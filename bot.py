@@ -833,6 +833,47 @@ This is the current available balance for this trade."""
     logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token} on {network}")
 
 
+async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /add command - verify escrow address for all users"""
+    user = update.effective_user
+    logger.info(f"🔍 /add command by user {user.id}")
+    
+    try:
+        await update.message.delete()
+        logger.info(f"🗑️ Deleted /add command message from user {user.id}")
+    except Exception as e:
+        logger.warning(f"Could not delete /add command message: {e}")
+    
+    if not context.args or len(context.args) == 0:
+        await update.effective_chat.send_message("❌ Usage: /add <escrow_address>")
+        return
+    
+    address_to_verify = context.args[0].strip().lower()
+    
+    escrow_addresses = {}
+    for addr in USDT_BSC_ADDRESSES:
+        escrow_addresses[addr.lower()] = {"token": "USDT", "chain": "BSC"}
+    for addr in USDC_BSC_ADDRESSES:
+        escrow_addresses[addr.lower()] = {"token": "USDC", "chain": "BSC"}
+    
+    if address_to_verify in escrow_addresses:
+        info = escrow_addresses[address_to_verify]
+        verified_text = f"""✅ Address <b>verified</b>
+
+Token: {info['token']}
+Chain: {info['chain']}"""
+        await update.effective_chat.send_message(verified_text, parse_mode='HTML')
+        logger.info(f"✅ Address verified for user {user.id}: {address_to_verify} ({info['token']} on {info['chain']})")
+    else:
+        warning_text = """⚠️ <b>WARNING:</b> Address Not Verified
+
+❌ This address does <b>NOT</b> belong to this bot.
+
+<b>🚫 DO NOT send funds to this address!</b>"""
+        await update.effective_chat.send_message(warning_text, parse_mode='HTML')
+        logger.info(f"⚠️ Address NOT verified for user {user.id}: {address_to_verify}")
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle button presses"""
     query = update.callback_query
@@ -3327,6 +3368,7 @@ def main() -> None:
     application.add_handler(CommandHandler("link", link_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("add", add_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
