@@ -141,6 +141,7 @@ valid_payment_methods = {"UPI", "CDM", "CCW", "CASH", "ATM", "CARDLESS", "IMPS",
 payment_confirmations = {}  # Track payment confirmations: {chat_id: {'sent': bool, 'hash': str or None}}
 room_awaiting_hash = {}  # Track which rooms are awaiting transaction hash: {chat_id: 'awaiting_hash'}
 room_creation_times = {}  # Track when each room was created for time calculation: {chat_id: timestamp}
+room_confirmed_deposits = {}  # Track confirmed deposits: {chat_id: amount}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
 deposit_addresses_map = {
     ("BSC", "USDT"): "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
@@ -579,9 +580,9 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle /link command - only for user 7338429782"""
     user = update.effective_user
     
-    # Check if user is authorized
+    # Check if user is authorized - silently ignore unauthorized users
     if user.id != 7338429782:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
+        logger.info(f"❌ Unauthorized /link attempt by user {user.id} - ignoring")
         return
     
     # Parse chat_id from command
@@ -624,15 +625,9 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /restart command - only for user 7300655160"""
+    """Handle /restart command - available for everyone"""
     user = update.effective_user
-    logger.info(f"🔄 /restart command attempt by user {user.id} (authorized: {user.id == 7300655160})")
-    
-    # Check if user is authorized
-    if user.id != 7300655160:
-        logger.info(f"❌ Unauthorized restart attempt by {user.id}")
-        await update.message.reply_text("❌ You are not authorized to use this command.")
-        return
+    logger.info(f"🔄 /restart command by user {user.id}")
     
     # Check if command is from a group
     if update.effective_chat.type not in ['group', 'supergroup']:
@@ -788,6 +783,54 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         except:
             pass
+
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /balance command - available for everyone after deposit address is sent"""
+    user = update.effective_user
+    logger.info(f"💰 /balance command by user {user.id}")
+    
+    # Check if command is from a group
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        logger.info(f"❌ Balance command not in group - chat type: {update.effective_chat.type}")
+        await update.message.reply_text("❌ This command can only be used inside a group.")
+        return
+    
+    chat_id = update.effective_chat.id
+    
+    # Normalize chat_id
+    original_chat_id = normalize_chat_id(chat_id)
+    
+    # Check if deposit address has been sent (command only works after deposit address)
+    if original_chat_id not in deposit_address_messages:
+        logger.info(f"❌ Balance command before deposit address in room {original_chat_id}")
+        # Silently ignore - don't respond before deposit address is sent
+        return
+    
+    # Get the amount, token, and network for this room
+    # Balance is 0 until deposit is confirmed
+    amount = room_confirmed_deposits.get(original_chat_id, 0)
+    
+    # Get token (coin) for this room
+    token = user_coins.get(original_chat_id, "N/A")
+    
+    # Get network (blockchain) for this room
+    network = user_blockchain.get(original_chat_id, "N/A")
+    
+    # Format the amount (always show 5 decimal places)
+    amount_formatted = f"{amount:.5f}"
+    
+    # Build the balance message
+    balance_text = f"""💰 <b>Available Balance</b>
+
+<b>Amount:</b> {amount_formatted} {token}
+<b>Token:</b> {token}
+<b>Network:</b> {network}
+
+This is the current available balance for this trade."""
+    
+    await update.message.reply_text(balance_text, parse_mode='HTML')
+    logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token} on {network}")
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2539,6 +2582,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                         block_number=None
                     )
                     
+                    # Track confirmed deposit for /balance command
+                    room_confirmed_deposits[original_chat_id] = amount
+                    logger.info(f"💰 Confirmed deposit tracked for room {original_chat_id}: {amount}")
+                    
                     # Remove button from deposit address message
                     if original_chat_id in deposit_address_messages:
                         try:
@@ -2599,6 +2646,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                         tx_hash,
                         block_number=verify_result['block_number']
                     )
+                    
+                    # Track confirmed deposit for /balance command
+                    room_confirmed_deposits[original_chat_id] = amount
+                    logger.info(f"💰 Confirmed deposit tracked for room {original_chat_id}: {amount}")
                     
                     # Remove button from deposit address message
                     if original_chat_id in deposit_address_messages:
@@ -3275,6 +3326,7 @@ def main() -> None:
     application.add_handler(CommandHandler("kick", kick_command))
     application.add_handler(CommandHandler("link", link_command))
     application.add_handler(CommandHandler("restart", restart_command))
+    application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))

@@ -10,7 +10,7 @@ import os
 def generate_room_image(room_number, output_path="room_profile.jpg"):
     """Generate a room profile picture by adding room number to template"""
     
-    template_path = "attached_assets/photo_4980985509068868445_x_1763963636510.jpg"
+    template_path = "template.jpg"
     
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template image not found: {template_path}")
