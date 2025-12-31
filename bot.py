@@ -157,7 +157,7 @@ usdt_bsc_address_index = 0  # Track which address to use next for USDT BSC
 
 # USDC BSC rotating addresses
 USDC_BSC_ADDRESSES = [
-    "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
+    "0xAe6313dE2fDD754734074D8a6F4835c10827115b",
     "0xC941064db91dB2B54e3Acd909a7020583f05bD14"
 ]
 usdc_bsc_address_index = 0  # Track which address to use next for USDC BSC
