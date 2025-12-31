@@ -833,19 +833,19 @@ This is the current available balance for this trade."""
     logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token} on {network}")
 
 
-async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /add command - verify escrow address for all users"""
+async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /verify command - verify escrow address for all users"""
     user = update.effective_user
-    logger.info(f"🔍 /add command by user {user.id}")
+    logger.info(f"🔍 /verify command by user {user.id}")
     
     try:
         await update.message.delete()
-        logger.info(f"🗑️ Deleted /add command message from user {user.id}")
+        logger.info(f"🗑️ Deleted /verify command message from user {user.id}")
     except Exception as e:
-        logger.warning(f"Could not delete /add command message: {e}")
+        logger.warning(f"Could not delete /verify command message: {e}")
     
     if not context.args or len(context.args) == 0:
-        await update.effective_chat.send_message("❌ Usage: /add <escrow_address>")
+        await update.effective_chat.send_message("❌ Usage: /verify <escrow_address>")
         return
     
     address_to_verify = context.args[0].strip().lower()
@@ -3368,7 +3368,7 @@ def main() -> None:
     application.add_handler(CommandHandler("link", link_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("balance", balance_command))
-    application.add_handler(CommandHandler("add", add_command))
+    application.add_handler(CommandHandler("verify", verify_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
