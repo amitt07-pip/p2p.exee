@@ -491,6 +491,43 @@ def get_active_deals() -> List[Dict[str, Any]]:
         return []
 
 
+DEAL_STATUS_EXPIRED = 'expired'
+
+
+def get_expired_deals(hours: int = 12) -> List[Dict[str, Any]]:
+    """Get all deals that have been running for more than specified hours"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT * FROM deals 
+            WHERE deal_status NOT IN (%s, %s, %s)
+            AND creation_time < NOW() - INTERVAL '%s hours'
+            ORDER BY creation_time ASC
+        """, (DEAL_STATUS_COMPLETED, DEAL_STATUS_CANCELLED, DEAL_STATUS_EXPIRED, hours))
+        
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.warning(f"Could not get expired deals: {e}")
+        return []
+
+
+def auto_close_expired_deal(chat_id: int) -> bool:
+    """Mark a deal as expired/auto-closed after 12 hours"""
+    return update_deal(
+        chat_id,
+        deal_status=DEAL_STATUS_EXPIRED,
+        completed_time=datetime.now()
+    )
+
+
 def store_extra_data(chat_id: int, key: str, value: Any) -> bool:
     """Store additional data in the extra_data JSON field"""
     try:

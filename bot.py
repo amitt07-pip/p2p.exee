@@ -3327,6 +3327,63 @@ async def check_new_deal_rooms(application: Application) -> None:
             logger.warning(f"Error in check_new_deal_rooms: {e}")
 
 
+async def auto_close_expired_deals(application: Application) -> None:
+    """Periodically check for deals running more than 12 hours and auto-close them"""
+    while True:
+        try:
+            await asyncio.sleep(300)  # Check every 5 minutes
+            
+            expired_deals = deals_db.get_expired_deals(hours=12)
+            
+            for deal in expired_deals:
+                chat_id = deal['chat_id']
+                room_name = deal.get('room_name', 'Unknown Room')
+                
+                try:
+                    deals_db.auto_close_expired_deal(chat_id)
+                    logger.info(f"⏰ Auto-closed expired deal in {room_name} (chat_id: {chat_id})")
+                    
+                    send_chat_id = -1000000000000 - chat_id
+                    
+                    expired_message = """⏰ <b>Deal Auto-Closed</b>
+
+This deal has been automatically closed because it was running for more than 12 hours without completion.
+
+If you need to continue this transaction, please start a new deal using /deal command."""
+                    
+                    try:
+                        await application.bot.send_message(
+                            chat_id=send_chat_id,
+                            text=expired_message,
+                            parse_mode='HTML'
+                        )
+                        logger.info(f"📨 Sent auto-close notification to room {chat_id}")
+                    except Exception as e:
+                        logger.warning(f"Could not send auto-close notification to room {chat_id}: {e}")
+                    
+                    disclaimer_sent.discard(chat_id)
+                    role_selection_sent.discard(chat_id)
+                    processed_rooms.discard(chat_id)
+                    rooms_waiting_for_requests.discard(chat_id)
+                    
+                    if chat_id in room_awaiting_hash:
+                        del room_awaiting_hash[chat_id]
+                    if chat_id in room_transaction_state:
+                        del room_transaction_state[chat_id]
+                    if chat_id in user_roles:
+                        del user_roles[chat_id]
+                    if chat_id in approvals:
+                        del approvals[chat_id]
+                    if chat_id in release_approvals:
+                        del release_approvals[chat_id]
+                    
+                except Exception as e:
+                    logger.warning(f"Error auto-closing deal {chat_id}: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Error in auto_close_expired_deals: {e}")
+
+
 def main() -> None:
     """Start the bot"""
     token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -3369,6 +3426,8 @@ def main() -> None:
         """Start background tasks after app is initialized"""
         # Create the task only after app is running
         app.create_task(check_new_deal_rooms(app), update=None)
+        app.create_task(auto_close_expired_deals(app), update=None)
+        logger.info("✅ Started background tasks: check_new_deal_rooms, auto_close_expired_deals")
     
     # Schedule the background task to start after the bot is initialized
     application.post_init = start_background_tasks
