@@ -87,6 +87,34 @@ def init_deals_table():
             )
         """)
         
+        columns_to_add = [
+            ("deal_status", "TEXT DEFAULT 'pending'"),
+            ("buyer_approved", "BOOLEAN DEFAULT FALSE"),
+            ("seller_approved", "BOOLEAN DEFAULT FALSE"),
+            ("buyer_release_approved", "BOOLEAN DEFAULT FALSE"),
+            ("seller_release_approved", "BOOLEAN DEFAULT FALSE"),
+            ("blockchain", "TEXT DEFAULT 'BSC'"),
+            ("coin", "TEXT"),
+            ("escrow_address", "TEXT"),
+            ("tx_hash", "TEXT"),
+            ("confirmed_time", "TIMESTAMP"),
+            ("deposit_time", "TIMESTAMP"),
+            ("completed_time", "TIMESTAMP"),
+            ("room_name", "TEXT"),
+            ("initiator_username", "TEXT"),
+            ("counterparty_username", "TEXT"),
+            ("extra_data", "JSONB DEFAULT '{}'::jsonb"),
+            ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ]
+        
+        for col_name, col_type in columns_to_add:
+            try:
+                cur.execute(f"""
+                    ALTER TABLE deals ADD COLUMN IF NOT EXISTS {col_name} {col_type}
+                """)
+            except Exception as col_err:
+                logger.debug(f"Column {col_name} may already exist: {col_err}")
+        
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_deals_status ON deals(deal_status)
         """)
