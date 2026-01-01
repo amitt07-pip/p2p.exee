@@ -7,37 +7,41 @@ Adds room number to template image
 from PIL import Image, ImageDraw, ImageFont
 import os
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
 def generate_room_image(room_number, output_path="room_profile.jpg"):
     """Generate a room profile picture by adding room number to template"""
     
-    template_path = "attached_assets/photo_4980985509068868445_x_1763963636510.jpg"
+    template_path = os.path.join(SCRIPT_DIR, "template.jpg")
     
     if not os.path.exists(template_path):
-        raise FileNotFoundError(f"Template image not found: {template_path}")
+        old_template = "attached_assets/photo_4980985509068868445_x_1763963636510.jpg"
+        if os.path.exists(old_template):
+            template_path = old_template
+        else:
+            raise FileNotFoundError(f"Template image not found: {template_path}")
     
-    # Open template image
     img = Image.open(template_path).convert('RGB')
     draw = ImageDraw.Draw(img)
     
-    # Load font for room number text - using exact same Bold weight as ROOM text
+    poppins_font_path = os.path.join(SCRIPT_DIR, "fonts", "Poppins-Bold.ttf")
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
+        if os.path.exists(poppins_font_path):
+            font = ImageFont.truetype(poppins_font_path, 58)
+        else:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 58)
     except:
         font = ImageFont.load_default()
     
-    # Text to add (space before number to separate from "ROOM")
     text = f" {room_number}"
-    text_color = (255, 255, 255)  # White
+    text_color = (255, 255, 255)
     
-    # Position based on comparing example "ROOM 21" with generated "ROOM 41"
-    # Adjusted gap and size to match example image
-    text_x = 410
+    text_x = 415
     text_y = 280
     
-    # Draw text
     draw.text((text_x, text_y), text, fill=text_color, font=font)
     
-    # Save the image
     img.save(output_path, quality=95)
     return output_path
 
