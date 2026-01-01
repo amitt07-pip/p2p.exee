@@ -15,6 +15,7 @@ import psycopg2
 import warnings
 from psycopg2.extras import Json
 from dotenv import load_dotenv
+import deals_db
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
     Application,
@@ -766,6 +767,10 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info(f"✅ Cleared transaction state for room {room_name}")
         logger.info(f"🔍 room_initiators[{original_chat_id}] = {room_initiators.get(original_chat_id)}")
         
+        # Reset deal in database
+        deals_db.reset_deal(original_chat_id)
+        logger.info(f"📊 Reset deal in database for room {original_chat_id}")
+        
         # Send disclaimer message to restart from the beginning
         send_chat_id = -1000000000000 - original_chat_id
         logger.info(f"📨 Sending disclaimer to send_chat_id: {send_chat_id}")
@@ -828,6 +833,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             release_approvals[original_chat_id][user_role] = 'approved'
             buyer_status = release_approvals[original_chat_id].get('buyer', 'waiting')
             seller_status = release_approvals[original_chat_id].get('seller', 'waiting')
+            
+            # Save release approval to database
+            deals_db.approve_release(original_chat_id, user_role)
             
             # Build status emojis and text
             buyer_emoji = '✅' if buyer_status == 'approved' else '❌' if buyer_status == 'rejected' else '⌛️'
@@ -1215,6 +1223,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             logger.info(f"✅ User selected blockchain: BSC in room {chat_id}")
             user_blockchain[chat_id] = 'BSC'
             
+            # Save blockchain to database
+            deals_db.set_deal_blockchain(chat_id, 'BSC')
+            
             # Update the button to show checkmark
             try:
                 await query.edit_message_caption(
@@ -1258,6 +1269,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             logger.info(f"✅ User {query.from_user.username} selected coin: {coin_type} in room {chat_id}")
             user_coins[chat_id] = coin_type
+            
+            # Save coin to database
+            deals_db.set_deal_coin(chat_id, coin_type)
             
             # Update buttons to show mutual exclusivity
             usdt_selected = coin_type == 'USDT'
@@ -1386,6 +1400,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             approvals[chat_id][user_role] = True
             logger.info(f"✅ {user_role.upper()} {username} approved deal in room {chat_id}")
             
+            # Save approval to database
+            deals_db.approve_deal_summary(chat_id, user_role)
+            
             # Get transaction data for updated message
             amount = None
             rate = None
@@ -1511,6 +1528,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         logger.info(f"🔄 Using USDC BSC address {current_index + 1}: {deposit_address}")
                     else:
                         deposit_address = deposit_addresses_map.get((blockchain, coin_type), "0xDA4c2a5B876b0c7521e1c752690D8705080000fE")
+                    
+                    # Confirm deal in database with escrow address
+                    deals_db.confirm_deal(chat_id, escrow_address=deposit_address)
                     
                     deposit_text = f"""💳 {coin_type} {blockchain} Deposit
 
@@ -1680,6 +1700,26 @@ Once you've sent the amount, tap the button below."""
             # Check if both roles are now selected and send Step 1
             if both_selected and original_chat_id not in step1_messages_sent:
                 logger.info(f"🔄 Both roles selected, preparing Step 1 for room {original_chat_id}")
+                
+                # Save roles to database
+                buyer_user = None
+                seller_user = None
+                for uname, urole in user_roles[original_chat_id].items():
+                    if urole == 'BUYER':
+                        buyer_user = uname
+                    elif urole == 'SELLER':
+                        seller_user = uname
+                
+                if buyer_user and seller_user:
+                    deals_db.set_deal_roles(
+                        chat_id=original_chat_id,
+                        buyer_username=buyer_user,
+                        seller_username=seller_user,
+                        buyer_user_id=get_user_id(buyer_user),
+                        seller_user_id=get_user_id(seller_user)
+                    )
+                    logger.info(f"📊 Saved roles to database: buyer={buyer_user}, seller={seller_user}")
+                
                 await send_step1_amount_message(context.bot, send_chat_id, original_chat_id)
             
             return CHOOSING
@@ -2305,6 +2345,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 user_amounts[user_id] = amount
                 logger.info(f"✅ User {user.username} entered amount: {amount} in room {original_chat_id}")
                 
+                # Save amount to database
+                deals_db.set_deal_amount(original_chat_id, amount)
+                
                 # Send Step 2 message
                 send_chat_id = -1000000000000 - original_chat_id
                 await send_step2_rate_message(context.bot, send_chat_id, original_chat_id)
@@ -2323,6 +2366,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 
                 user_rates[user_id] = rate
                 logger.info(f"✅ User {user.username} entered rate: {rate} in room {original_chat_id}")
+                
+                # Save rate to database
+                deals_db.set_deal_rate(original_chat_id, rate)
                 
                 # Send Step 3 message (Payment Method)
                 send_chat_id = -1000000000000 - original_chat_id
@@ -2344,6 +2390,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             # Store as uppercase for consistency
             user_payment_methods[user_id] = payment_method_upper
             logger.info(f"✅ User {user.username} selected payment method: {payment_method_upper} in room {original_chat_id}")
+            
+            # Save payment method to database
+            deals_db.set_deal_payment_method(original_chat_id, payment_method_upper)
             
             # Send Step 4 message (Blockchain Selection)
             send_chat_id = -1000000000000 - original_chat_id
@@ -2380,6 +2429,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             buyer_addresses[original_chat_id] = text
             save_room_data(original_chat_id)
             logger.info(f"✅ Buyer {user.username} entered wallet address: {text} in room {original_chat_id}")
+            
+            # Save buyer address to database
+            deals_db.set_buyer_address(original_chat_id, text)
             
             # Move to seller wallet address step
             room_transaction_state[original_chat_id] = 'step7_seller_address'
@@ -2444,6 +2496,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             seller_addresses[original_chat_id] = text
             save_room_data(original_chat_id)
             logger.info(f"✅ Seller {user.username} entered wallet address: {text} in room {original_chat_id}")
+            
+            # Save seller address to database and update status
+            deals_db.set_seller_address(original_chat_id, text)
+            deals_db.update_deal(original_chat_id, deal_status=deals_db.DEAL_STATUS_SUMMARY_SHOWN)
             
             # Send deal summary message with approval button
             send_chat_id = -1000000000000 - original_chat_id
@@ -2559,6 +2615,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                         except Exception as e:
                             logger.warning(f"Could not edit deposit address message: {e}")
                     
+                    # Record deposit in database
+                    deals_db.record_deposit(original_chat_id, tx_hash)
+                    
                     # Send payment received message
                     payment_received_text = (
                         "✅ <b>Payment Received!</b>\n\n"
@@ -2619,6 +2678,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                             logger.info(f"✅ Removed button from deposit address message in room {original_chat_id}")
                         except Exception as e:
                             logger.warning(f"Could not edit deposit address message: {e}")
+                    
+                    # Record deposit in database (verified transaction)
+                    deals_db.record_deposit(original_chat_id, tx_hash)
                     
                     # Send payment received message
                     payment_received_text = (
@@ -3141,6 +3203,15 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
             room_creation_times[chat_id] = time.time()
             logger.info(f"⏱️ Room creation time tracked for {room_name}")
         
+        # Create deal record in database
+        deals_db.create_deal(
+            chat_id=chat_id,
+            initiator_username=initiator_username,
+            counterparty_username=counterparty_username,
+            room_name=room_name
+        )
+        logger.info(f"📊 Deal record created in database for {room_name}")
+        
         # Send waiting messages
         try:
             # For supergroups, use the most reliable format first
@@ -3283,6 +3354,9 @@ def main() -> None:
     
     # Add error handler
     application.add_error_handler(error_handler)
+    
+    # Initialize deals database table
+    deals_db.init_deals_table()
     
     # Load persistent data from database
     load_room_data()
