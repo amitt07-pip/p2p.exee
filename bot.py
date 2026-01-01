@@ -863,6 +863,50 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await send_deal_complete_message(context.bot, send_chat_id, original_chat_id, buyer_addr)
                 logger.info(f"✅ Deal complete message sent to room {original_chat_id}")
                 
+                # Mark deal as completed in database
+                deals_db.complete_deal(original_chat_id)
+                
+                # Send notification to logs channel
+                try:
+                    # Get deal amount from database or in-memory
+                    deal_data = deals_db.get_deal(original_chat_id)
+                    amount = deal_data.get('amount') if deal_data else None
+                    coin = deal_data.get('coin', 'USDT') if deal_data else 'USDT'
+                    
+                    if amount is None:
+                        for uid, amt in user_amounts.items():
+                            amount = amt
+                            break
+                    
+                    amount_str = f"{amount} {coin}" if amount else "N/A"
+                    
+                    # Generate invite link for the group
+                    try:
+                        invite_link = await context.bot.create_chat_invite_link(
+                            chat_id=send_chat_id,
+                            name="Deal Completed Link"
+                        )
+                        group_link = invite_link.invite_link
+                    except Exception as e:
+                        logger.warning(f"Could not generate invite link: {e}")
+                        group_link = "Unable to generate link"
+                    
+                    completion_notification = (
+                        f"Deal Completed ✅\n\n"
+                        f"Buyer - @{buyer_username}\n"
+                        f"Seller - @{seller_username}\n"
+                        f"Amount - {amount_str}\n"
+                        f"Group Link - {group_link}"
+                    )
+                    
+                    await context.bot.send_message(
+                        chat_id=-1003266978268,
+                        text=completion_notification
+                    )
+                    logger.info(f"✅ Sent deal completion notification to logs channel for room {original_chat_id}")
+                except Exception as e:
+                    logger.warning(f"Could not send completion notification to logs channel: {e}")
+                
                 # Update release confirmation message with just group id
                 if original_chat_id in release_messages:
                     msg_id = release_messages[original_chat_id]
