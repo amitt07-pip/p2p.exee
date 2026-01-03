@@ -197,8 +197,9 @@ def save_room_data(chat_id: int):
         buyer_user = room_initiators.get(chat_id, {}).get('buyer', '')
         seller_user = room_initiators.get(chat_id, {}).get('seller', '')
         
+        # Use to_timestamp() to convert epoch seconds to timestamp
         cur.execute(
-            "INSERT INTO room_data (chat_id, buyer_username, seller_username, buyer_address, seller_address, room_creation_time) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (chat_id) DO UPDATE SET buyer_address = %s, seller_address = %s",
+            "INSERT INTO room_data (chat_id, buyer_username, seller_username, buyer_address, seller_address, room_creation_time) VALUES (%s, %s, %s, %s, %s, to_timestamp(%s)) ON CONFLICT (chat_id) DO UPDATE SET buyer_address = %s, seller_address = %s",
             (chat_id, buyer_user, seller_user, buyer_addr, seller_addr, room_time, buyer_addr, seller_addr)
         )
         conn.commit()
