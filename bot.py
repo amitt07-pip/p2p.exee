@@ -15,7 +15,7 @@ import psycopg2
 import warnings
 from psycopg2.extras import Json
 from dotenv import load_dotenv
-import deals_db
+import database
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
     Application,
@@ -768,7 +768,7 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info(f"🔍 room_initiators[{original_chat_id}] = {room_initiators.get(original_chat_id)}")
         
         # Reset deal in database
-        deals_db.reset_deal(original_chat_id)
+        database.reset_deal(original_chat_id)
         logger.info(f"📊 Reset deal in database for room {original_chat_id}")
         
         # Send disclaimer message to restart from the beginning
@@ -835,7 +835,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             seller_status = release_approvals[original_chat_id].get('seller', 'waiting')
             
             # Save release approval to database
-            deals_db.approve_release(original_chat_id, user_role)
+            database.approve_release(original_chat_id, user_role)
             
             # Build status emojis and text
             buyer_emoji = '✅' if buyer_status == 'approved' else '❌' if buyer_status == 'rejected' else '⌛️'
@@ -864,12 +864,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 logger.info(f"✅ Deal complete message sent to room {original_chat_id}")
                 
                 # Mark deal as completed in database
-                deals_db.complete_deal(original_chat_id)
+                database.complete_deal(original_chat_id)
                 
                 # Send notification to logs channel
                 try:
                     # Get deal amount from database or in-memory
-                    deal_data = deals_db.get_deal(original_chat_id)
+                    deal_data = database.get_deal(original_chat_id)
                     amount = deal_data.get('amount') if deal_data else None
                     coin = deal_data.get('coin', 'USDT') if deal_data else 'USDT'
                     
@@ -1268,7 +1268,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             user_blockchain[chat_id] = 'BSC'
             
             # Save blockchain to database
-            deals_db.set_deal_blockchain(chat_id, 'BSC')
+            database.set_network(chat_id, 'BSC')
             
             # Update the button to show checkmark
             try:
@@ -1315,7 +1315,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             user_coins[chat_id] = coin_type
             
             # Save coin to database
-            deals_db.set_deal_coin(chat_id, coin_type)
+            database.set_coin(chat_id, coin_type)
             
             # Update buttons to show mutual exclusivity
             usdt_selected = coin_type == 'USDT'
@@ -1445,7 +1445,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             logger.info(f"✅ {user_role.upper()} {username} approved deal in room {chat_id}")
             
             # Save approval to database
-            deals_db.approve_deal_summary(chat_id, user_role)
+            database.approve_summary(chat_id, user_role)
             
             # Get transaction data for updated message
             amount = None
@@ -1574,7 +1574,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         deposit_address = deposit_addresses_map.get((blockchain, coin_type), "0xDA4c2a5B876b0c7521e1c752690D8705080000fE")
                     
                     # Confirm deal in database with escrow address
-                    deals_db.confirm_deal(chat_id, escrow_address=deposit_address)
+                    database.confirm_deal(chat_id, escrow_address=deposit_address)
                     
                     deposit_text = f"""💳 {coin_type} {blockchain} Deposit
 
@@ -1755,7 +1755,7 @@ Once you've sent the amount, tap the button below."""
                         seller_user = uname
                 
                 if buyer_user and seller_user:
-                    deals_db.set_deal_roles(
+                    database.set_roles(
                         chat_id=original_chat_id,
                         buyer_username=buyer_user,
                         seller_username=seller_user,
@@ -2390,7 +2390,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 logger.info(f"✅ User {user.username} entered amount: {amount} in room {original_chat_id}")
                 
                 # Save amount to database
-                deals_db.set_deal_amount(original_chat_id, amount)
+                database.set_amount(original_chat_id, amount)
                 
                 # Send Step 2 message
                 send_chat_id = -1000000000000 - original_chat_id
@@ -2412,7 +2412,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 logger.info(f"✅ User {user.username} entered rate: {rate} in room {original_chat_id}")
                 
                 # Save rate to database
-                deals_db.set_deal_rate(original_chat_id, rate)
+                database.set_rate(original_chat_id, rate)
                 
                 # Send Step 3 message (Payment Method)
                 send_chat_id = -1000000000000 - original_chat_id
@@ -2436,7 +2436,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             logger.info(f"✅ User {user.username} selected payment method: {payment_method_upper} in room {original_chat_id}")
             
             # Save payment method to database
-            deals_db.set_deal_payment_method(original_chat_id, payment_method_upper)
+            database.set_payment_method(original_chat_id, payment_method_upper)
             
             # Send Step 4 message (Blockchain Selection)
             send_chat_id = -1000000000000 - original_chat_id
@@ -2475,7 +2475,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             logger.info(f"✅ Buyer {user.username} entered wallet address: {text} in room {original_chat_id}")
             
             # Save buyer address to database
-            deals_db.set_buyer_address(original_chat_id, text)
+            database.set_buyer_address(original_chat_id, text)
             
             # Move to seller wallet address step
             room_transaction_state[original_chat_id] = 'step7_seller_address'
@@ -2542,8 +2542,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             logger.info(f"✅ Seller {user.username} entered wallet address: {text} in room {original_chat_id}")
             
             # Save seller address to database and update status
-            deals_db.set_seller_address(original_chat_id, text)
-            deals_db.update_deal(original_chat_id, deal_status=deals_db.DEAL_STATUS_SUMMARY_SHOWN)
+            database.set_seller_address(original_chat_id, text)
+            database.update_deal(original_chat_id, deal_status=database.DEAL_STATUS_SUMMARY_SHOWN)
             
             # Send deal summary message with approval button
             send_chat_id = -1000000000000 - original_chat_id
@@ -2660,7 +2660,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                             logger.warning(f"Could not edit deposit address message: {e}")
                     
                     # Record deposit in database
-                    deals_db.record_deposit(original_chat_id, tx_hash)
+                    database.record_deposit(original_chat_id, tx_hash)
                     
                     # Send payment received message
                     payment_received_text = (
@@ -2724,7 +2724,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                             logger.warning(f"Could not edit deposit address message: {e}")
                     
                     # Record deposit in database (verified transaction)
-                    deals_db.record_deposit(original_chat_id, tx_hash)
+                    database.record_deposit(original_chat_id, tx_hash)
                     
                     # Send payment received message
                     payment_received_text = (
@@ -3248,7 +3248,7 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
             logger.info(f"⏱️ Room creation time tracked for {room_name}")
         
         # Create deal record in database
-        deals_db.create_deal(
+        database.create_deal(
             chat_id=chat_id,
             initiator_username=initiator_username,
             counterparty_username=counterparty_username,
@@ -3377,14 +3377,14 @@ async def auto_close_expired_deals(application: Application) -> None:
         try:
             await asyncio.sleep(300)  # Check every 5 minutes
             
-            expired_deals = deals_db.get_expired_deals(hours=12)
+            expired_deals = database.get_expired_deals(hours=12)
             
             for deal in expired_deals:
                 chat_id = deal['chat_id']
                 room_name = deal.get('room_name', 'Unknown Room')
                 
                 try:
-                    deals_db.auto_close_expired_deal(chat_id)
+                    database.expire_deal(chat_id)
                     logger.info(f"⏰ Auto-closed expired deal in {room_name} (chat_id: {chat_id})")
                     
                     send_chat_id = -1000000000000 - chat_id
@@ -3457,7 +3457,7 @@ def main() -> None:
     application.add_error_handler(error_handler)
     
     # Initialize deals database table
-    deals_db.init_deals_table()
+    database.init_database()
     
     # Load persistent data from database
     load_room_data()

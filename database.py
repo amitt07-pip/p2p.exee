@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 DEAL_STATUS_PENDING = 'pending'
 DEAL_STATUS_ROLES_SELECTED = 'roles_selected'
 DEAL_STATUS_DETAILS_ENTERED = 'details_entered'
+DEAL_STATUS_SUMMARY_SHOWN = 'summary_shown'
 DEAL_STATUS_CONFIRMED = 'confirmed'
 DEAL_STATUS_DEPOSIT_RECEIVED = 'deposit_received'
 DEAL_STATUS_RELEASE_PENDING = 'release_pending'
