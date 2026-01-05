@@ -1274,12 +1274,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Save blockchain to database
             database.set_network(chat_id, 'BSC')
             
-            # Update the button to show selection (no emojis)
+            # Update the button to show selection (no selection indicator)
             try:
                 await query.edit_message_caption(
                     caption="<b>Step 2 - Choose Blockchain</b>",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("BSC (selected)", callback_data=f"blockchain_bsc_{chat_id}_done"),
+                        InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}_done"),
                         InlineKeyboardButton("TRON", callback_data=f"blockchain_tron_{chat_id}")
                     ]]),
                     parse_mode='HTML'
@@ -1323,13 +1323,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Save blockchain to database
             database.set_network(chat_id, 'TRON')
             
-            # Update the button to show selection (no emojis)
+            # Update the button to show selection (no selection indicator)
             try:
                 await query.edit_message_caption(
                     caption="<b>Step 2 - Choose Blockchain</b>",
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}"),
-                        InlineKeyboardButton("TRON (selected)", callback_data=f"blockchain_tron_{chat_id}_done")
+                        InlineKeyboardButton("TRON", callback_data=f"blockchain_tron_{chat_id}_done")
                     ]]),
                     parse_mode='HTML'
                 )
@@ -1373,12 +1373,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Save coin to database
             database.set_coin(chat_id, coin_type)
             
-            # Update buttons to show mutual exclusivity (no emojis)
-            usdt_selected = coin_type == 'USDT'
-            
+            # Update buttons (no selection indicator)
             new_keyboard = [[
-                InlineKeyboardButton(("USDT (selected)" if usdt_selected else "USDT"), callback_data=f"coin_usdt_{chat_id}_done"),
-                InlineKeyboardButton(("USDC (selected)" if not usdt_selected else "USDC"), callback_data=f"coin_usdc_{chat_id}_done")
+                InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}_done"),
+                InlineKeyboardButton("USDC", callback_data=f"coin_usdc_{chat_id}_done")
             ]]
             reply_markup = InlineKeyboardMarkup(new_keyboard)
             
@@ -2348,17 +2346,74 @@ async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> Non
             break
         
         # Get coin for this room
-        coin = user_coins.get(chat_id)
+        coin = user_coins.get(chat_id, 'USDT')
         
-        # Format deal summary with bold and monospace as required
-        rate_formatted = f"₹{rate:.2f}" if rate else "N/A"
+        # Get blockchain for this room
+        chain = user_blockchain.get(chat_id, 'BSC')
         
-        deal_text = f"""📋 <b>Deal Summary</b>
+        # Calculate network fee based on chain
+        # BSC: 0.2, TRON: 3
+        if chain == 'TRON':
+            network_fee = 3.0
+        else:  # BSC
+            network_fee = 0.2
+        
+        # Calculate service fee based on user bios containing "@room"
+        # Try to get user bios - if we can't, default to 0.75%
+        buyer_has_room = False
+        seller_has_room = False
+        
+        try:
+            # Try to get buyer's bio
+            if buyer_username:
+                buyer_chat = await bot.get_chat(f"@{buyer_username}")
+                if buyer_chat and buyer_chat.bio and "@room" in buyer_chat.bio.lower():
+                    buyer_has_room = True
+                    logger.info(f"✅ Buyer @{buyer_username} has @room in bio")
+        except Exception as e:
+            logger.info(f"Could not get buyer bio: {e}")
+        
+        try:
+            # Try to get seller's bio
+            if seller_username:
+                seller_chat = await bot.get_chat(f"@{seller_username}")
+                if seller_chat and seller_chat.bio and "@room" in seller_chat.bio.lower():
+                    seller_has_room = True
+                    logger.info(f"✅ Seller @{seller_username} has @room in bio")
+        except Exception as e:
+            logger.info(f"Could not get seller bio: {e}")
+        
+        # Determine service fee percentage
+        # Both have @room: 0.25%, One has @room: 0.5%, Neither has @room: 0.75%
+        if buyer_has_room and seller_has_room:
+            service_fee_percent = 0.25
+        elif buyer_has_room or seller_has_room:
+            service_fee_percent = 0.5
+        else:
+            service_fee_percent = 0.75
+        
+        # Calculate service fee amount
+        amount_float = float(amount) if amount else 0
+        service_fee_amount = amount_float * (service_fee_percent / 100)
+        
+        # Calculate release amount (amount - network fee - service fee)
+        release_amount = amount_float - network_fee - service_fee_amount
+        
+        # Format values
+        rate_formatted = f"₹{rate:.1f}" if rate else "N/A"
+        network_fee_formatted = f"{network_fee} {coin}"
+        service_fee_formatted = f"{service_fee_percent}%"
+        release_amount_formatted = f"{release_amount:.2f} {coin}"
+        
+        deal_text = f"""📋  <b>Deal Summary</b>
 
-• <b>Amount:</b> {amount} {coin if coin else 'N/A'}
+• <b>Amount:</b> {amount} {coin}
 • <b>Rate:</b> {rate_formatted}
 • <b>Payment:</b> {payment_method}
-• Chain: BSC
+• <b>Chain:</b> {chain}
+• <b>Network Fee:</b> {network_fee_formatted}
+• <b>Service Fee:</b> {service_fee_formatted}
+• <b>Release Amount:</b> {release_amount_formatted}
 • <b>Buyer Address:</b> <code>{buyer_address}</code>
 • <b>Seller Address:</b> <code>{seller_address}</code>
 
@@ -3123,18 +3178,27 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
         logger.info(f"Updating join status for @{username} in {room_name}")
         logger.info(f"Available message IDs: {msg_info}")
         
-        # Update initiator message if user is initiator (case-insensitive)
+        # Delete waiting message and send new joined message for initiator (case-insensitive)
         if username.lower() == initiator_username.lower():
             logger.info(f"Checking initiator message for @{username} == @{initiator_username}")
             if 'initiator_msg_id' in msg_info:
                 try:
-                    logger.info(f"Editing message {msg_info['initiator_msg_id']} in chat {send_chat_id}")
-                    await bot.edit_message_text(
+                    # Delete the waiting message
+                    logger.info(f"Deleting waiting message {msg_info['initiator_msg_id']} in chat {send_chat_id}")
+                    await bot.delete_message(
                         chat_id=send_chat_id,
-                        message_id=msg_info['initiator_msg_id'],
+                        message_id=msg_info['initiator_msg_id']
+                    )
+                    logger.info(f"✅ Deleted initiator waiting message in {room_name}")
+                    
+                    # Send new joined message
+                    new_msg = await bot.send_message(
+                        chat_id=send_chat_id,
                         text=f"✅ @{initiator_username} joined."
                     )
-                    logger.info(f"✅ Updated initiator message in {room_name}")
+                    logger.info(f"✅ Sent new joined message for initiator in {room_name}")
+                    # Update stored message ID
+                    msg_info['initiator_msg_id'] = new_msg.message_id
                 except Exception as e:
                     logger.warning(f"❌ Could not update initiator message: {e}")
             else:
@@ -3142,18 +3206,27 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
         else:
             logger.info(f"Username @{username} != initiator @{initiator_username}")
         
-        # Update counterparty message if user is counterparty (case-insensitive)
+        # Delete waiting message and send new joined message for counterparty (case-insensitive)
         if username.lower() == counterparty_username.lower():
             logger.info(f"Checking counterparty message for @{username} == @{counterparty_username}")
             if 'counterparty_msg_id' in msg_info:
                 try:
-                    logger.info(f"Editing message {msg_info['counterparty_msg_id']} in chat {send_chat_id}")
-                    await bot.edit_message_text(
+                    # Delete the waiting message
+                    logger.info(f"Deleting waiting message {msg_info['counterparty_msg_id']} in chat {send_chat_id}")
+                    await bot.delete_message(
                         chat_id=send_chat_id,
-                        message_id=msg_info['counterparty_msg_id'],
+                        message_id=msg_info['counterparty_msg_id']
+                    )
+                    logger.info(f"✅ Deleted counterparty waiting message in {room_name}")
+                    
+                    # Send new joined message
+                    new_msg = await bot.send_message(
+                        chat_id=send_chat_id,
                         text=f"✅ @{counterparty_username} joined."
                     )
-                    logger.info(f"✅ Updated counterparty message in {room_name}")
+                    logger.info(f"✅ Sent new joined message for counterparty in {room_name}")
+                    # Update stored message ID
+                    msg_info['counterparty_msg_id'] = new_msg.message_id
                 except Exception as e:
                     logger.warning(f"❌ Could not update counterparty message: {e}")
             else:
