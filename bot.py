@@ -2092,6 +2092,33 @@ Release has been declined by the seller."""
             # Save approval to database
             database.approve_summary(chat_id, user_role)
             
+            # Get deal data for both summary text and confirmed message
+            amount = None
+            rate = None
+            payment_method = None
+            coin = user_coins.get(chat_id, 'USDT')
+            chain = user_blockchain.get(chat_id, 'BSC')
+            buyer_address = buyer_addresses.get(chat_id, "N/A")
+            seller_address = seller_addresses.get(chat_id, "N/A")
+            
+            # Get amount from user_amounts
+            for uid, stored_amt in user_amounts.items():
+                if amount is None:
+                    amount = stored_amt
+                    break
+            
+            # Get rate from user_rates
+            for uid, r in user_rates.items():
+                rate = r
+                break
+            
+            # Get payment method
+            for uid, pm in user_payment_methods.items():
+                payment_method = pm
+                break
+            
+            rate_formatted = f"₹{rate:.1f}" if rate else "N/A"
+            
             # Use the shared helper function to build deal text with current approval status
             deal_text = build_deal_summary_text(
                 chat_id, 
@@ -2107,9 +2134,9 @@ Release has been declined by the seller."""
                 reply_markup = None
                 
                 # Get all transaction data for deal confirmed message
-                deal_amount = f"{amount} {coin if coin else 'USDT'}"
+                deal_amount = f"{amount} {coin}"
                 fees = "0.00 USDT"
-                release_amount = f"{amount} {coin if coin else 'USDT'}"
+                release_amount = f"{amount} {coin}"
                 
                 # Format deal confirmed text with monospace for addresses
                 confirmed_text = f"""✅ <b>DEAL CONFIRMED</b>
@@ -2122,7 +2149,7 @@ Release has been declined by the seller."""
 <b>Release Amount:</b> {release_amount}
 <b>Rate:</b> {rate_formatted}
 <b>Payment:</b> {payment_method}
-<b>Chain:</b> BSC
+<b>Chain:</b> {chain}
 
 <b>Buyer Address:</b> <code>{buyer_address}</code>
 <b>Seller Address:</b> <code>{seller_address}</code>
