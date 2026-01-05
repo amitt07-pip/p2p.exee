@@ -13,9 +13,29 @@ import time
 import requests
 import psycopg2
 import warnings
+import secrets
 from psycopg2.extras import Json
 from dotenv import load_dotenv
 import database
+
+# Wallet generation imports
+try:
+    from eth_account import Account
+    ETH_ACCOUNT_AVAILABLE = True
+except ImportError:
+    ETH_ACCOUNT_AVAILABLE = False
+
+try:
+    from tronpy.keys import PrivateKey as TronPrivateKey
+    TRONPY_AVAILABLE = True
+except ImportError:
+    TRONPY_AVAILABLE = False
+
+try:
+    from cryptography.fernet import Fernet
+    CRYPTOGRAPHY_AVAILABLE = True
+except ImportError:
+    CRYPTOGRAPHY_AVAILABLE = False
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
     Application,
@@ -800,8 +820,12 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # Virtual wallet data storage (in-memory, will be replaced with DB later)
-# Structure: {user_id: {'usdt_bsc': float, 'usdt_tron': float, 'usdc_bsc': float, 'bnb_bsc': float, 'trx_tron': float, 'transactions': []}}
+# Structure: {user_id: {'usdt_bsc': float, 'usdt_tron': float, 'usdc_bsc': float, 'bnb_bsc': float, 'trx_tron': float, 'transactions': [], 'addresses': {'bsc': str, 'tron': str}}}
 virtual_wallets = {}
+
+# Generated wallet addresses per user (stores addresses and encrypted private keys)
+# Structure: {user_id: {'bsc': {'address': str, 'private_key': str}, 'tron': {'address': str, 'private_key': str}}}
+user_wallet_addresses = {}
 
 # Authorized user IDs for virtual wallet
 WALLET_AUTHORIZED_USERS = [6864194951, 7338429782]
@@ -815,13 +839,6 @@ WALLET_TOKENS = {
     'trx_tron': 'TRX (TRON)'
 }
 
-# Deposit addresses per network (configurable - admin can set these)
-# These are the addresses where users should send deposits
-WALLET_DEPOSIT_ADDRESSES = {
-    'bsc': os.getenv('WALLET_BSC_DEPOSIT_ADDRESS', '0x0000000000000000000000000000000000000000'),
-    'tron': os.getenv('WALLET_TRON_DEPOSIT_ADDRESS', 'T0000000000000000000000000000000000')
-}
-
 # Map tokens to their network for deposit address lookup
 TOKEN_NETWORK_MAP = {
     'usdt_bsc': 'bsc',
@@ -830,6 +847,66 @@ TOKEN_NETWORK_MAP = {
     'usdt_tron': 'tron',
     'trx_tron': 'tron'
 }
+
+
+def generate_bsc_wallet() -> dict:
+    """Generate a new BSC/EVM wallet address"""
+    if not ETH_ACCOUNT_AVAILABLE:
+        logger.warning("eth_account not available, cannot generate BSC wallet")
+        return {'address': 'BSC wallet generation unavailable', 'private_key': ''}
+    
+    try:
+        # Generate a new account
+        account = Account.create()
+        return {
+            'address': account.address,
+            'private_key': account.key.hex()
+        }
+    except Exception as e:
+        logger.error(f"Error generating BSC wallet: {e}")
+        return {'address': 'Error generating wallet', 'private_key': ''}
+
+
+def generate_tron_wallet() -> dict:
+    """Generate a new TRON wallet address"""
+    if not TRONPY_AVAILABLE:
+        logger.warning("tronpy not available, cannot generate TRON wallet")
+        return {'address': 'TRON wallet generation unavailable', 'private_key': ''}
+    
+    try:
+        # Generate a new TRON private key and derive address
+        priv_key = TronPrivateKey.random()
+        return {
+            'address': priv_key.public_key.to_base58check_address(),
+            'private_key': priv_key.hex()
+        }
+    except Exception as e:
+        logger.error(f"Error generating TRON wallet: {e}")
+        return {'address': 'Error generating wallet', 'private_key': ''}
+
+
+def get_user_deposit_address(user_id: int, network: str) -> str:
+    """Get or generate a deposit address for a user on a specific network"""
+    # Check if user already has an address for this network
+    if user_id in user_wallet_addresses:
+        if network in user_wallet_addresses[user_id]:
+            return user_wallet_addresses[user_id][network]['address']
+    else:
+        user_wallet_addresses[user_id] = {}
+    
+    # Generate new address for this network
+    if network == 'bsc':
+        wallet = generate_bsc_wallet()
+    elif network == 'tron':
+        wallet = generate_tron_wallet()
+    else:
+        return 'Unknown network'
+    
+    # Store the wallet
+    user_wallet_addresses[user_id][network] = wallet
+    logger.info(f"Generated new {network.upper()} wallet for user {user_id}: {wallet['address']}")
+    
+    return wallet['address']
 
 
 def init_wallet(user_id: int) -> dict:
@@ -2049,11 +2126,13 @@ Once you've sent the amount, tap the button below."""
                 await query.answer()
             
             elif action == 'depnet':
-                # Show deposit info for specific token with deposit address
+                # Show deposit info for specific token with user-specific deposit address
                 token = f"{parts[3]}_{parts[4]}"  # e.g., usdt_bsc
                 token_name = WALLET_TOKENS.get(token, token.upper())
                 network = TOKEN_NETWORK_MAP.get(token, 'bsc')
-                deposit_address = WALLET_DEPOSIT_ADDRESSES.get(network, 'Not configured')
+                
+                # Get or generate user-specific deposit address
+                deposit_address = get_user_deposit_address(user_id, network)
                 
                 # Format balance based on token (BNB uses 4 decimals)
                 balance_fmt = f"{wallet[token]:.4f}" if token == 'bnb_bsc' else f"{wallet[token]:.2f}"
@@ -2061,7 +2140,7 @@ Once you've sent the amount, tap the button below."""
                 deposit_text = (
                     f"💵 <b>Deposit {token_name}</b>\n\n"
                     f"<b>Current Balance:</b> <code>{balance_fmt}</code>\n\n"
-                    f"<b>Deposit Address ({network.upper()}):</b>\n"
+                    f"<b>Your Deposit Address ({network.upper()}):</b>\n"
                     f"<code>{deposit_address}</code>\n\n"
                     f"⚠️ Send only <b>{token_name}</b> to this address.\n"
                     f"After depositing, contact admin with your tx hash."
