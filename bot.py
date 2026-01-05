@@ -1274,11 +1274,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Save blockchain to database
             database.set_network(chat_id, 'BSC')
             
-            # Update the button to show checkmark
+            # Update the button to show selection (no emojis)
             try:
                 await query.edit_message_caption(
-                    caption="<b>🔗 Step 2 - Choose Blockchain</b>",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✔️ BSC", callback_data=f"blockchain_bsc_{chat_id}_done")]]),
+                    caption="<b>Step 2 - Choose Blockchain</b>",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("BSC (selected)", callback_data=f"blockchain_bsc_{chat_id}_done"),
+                        InlineKeyboardButton("TRON", callback_data=f"blockchain_tron_{chat_id}")
+                    ]]),
                     parse_mode='HTML'
                 )
                 logger.info(f"✅ Updated blockchain button for room {chat_id}")
@@ -1298,6 +1301,55 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
         except Exception as e:
             logger.error(f"❌ Error handling blockchain selection: {e}", exc_info=True)
+            await query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
+            return CHOOSING
+    
+    # Handle TRON blockchain selection
+    elif query.data.startswith('blockchain_tron_'):
+        try:
+            parts = query.data.split('_')
+            chat_id = int(parts[2])
+            send_chat_id = get_send_chat_id(chat_id)
+            
+            # Check if blockchain is already set (idempotency guard)
+            if chat_id in user_blockchain and user_blockchain[chat_id] == 'TRON':
+                # Already selected, just acknowledge
+                await query.answer("TRON already selected")
+                return CHOOSING
+            
+            logger.info(f"✅ User selected blockchain: TRON in room {chat_id}")
+            user_blockchain[chat_id] = 'TRON'
+            
+            # Save blockchain to database
+            database.set_network(chat_id, 'TRON')
+            
+            # Update the button to show selection (no emojis)
+            try:
+                await query.edit_message_caption(
+                    caption="<b>Step 2 - Choose Blockchain</b>",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}"),
+                        InlineKeyboardButton("TRON (selected)", callback_data=f"blockchain_tron_{chat_id}_done")
+                    ]]),
+                    parse_mode='HTML'
+                )
+                logger.info(f"✅ Updated blockchain button for room {chat_id}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not edit blockchain message for room {chat_id}: {e}")
+            
+            # Send Step 3 (coin selection) message only if not already sent
+            if chat_id not in step3_coin_messages:
+                logger.info(f"📨 Sending Step 3 (coin selection) message to room {chat_id}")
+                await send_step3_coin_message(context.bot, send_chat_id, chat_id)
+                logger.info(f"✅ Step 3 sent for room {chat_id}")
+            else:
+                logger.info(f"⏩ Step 3 already sent for room {chat_id}, skipping")
+            
+            await query.answer("Blockchain: TRON selected")
+            return CHOOSING
+            
+        except Exception as e:
+            logger.error(f"❌ Error handling TRON blockchain selection: {e}", exc_info=True)
             await query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
             return CHOOSING
     
@@ -1321,18 +1373,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Save coin to database
             database.set_coin(chat_id, coin_type)
             
-            # Update buttons to show mutual exclusivity
+            # Update buttons to show mutual exclusivity (no emojis)
             usdt_selected = coin_type == 'USDT'
             
             new_keyboard = [[
-                InlineKeyboardButton(("✔️ USDT" if usdt_selected else "USDT"), callback_data=f"coin_usdt_{chat_id}_done"),
-                InlineKeyboardButton(("✔️ USDC" if not usdt_selected else "USDC"), callback_data=f"coin_usdc_{chat_id}_done")
+                InlineKeyboardButton(("USDT (selected)" if usdt_selected else "USDT"), callback_data=f"coin_usdt_{chat_id}_done"),
+                InlineKeyboardButton(("USDC (selected)" if not usdt_selected else "USDC"), callback_data=f"coin_usdc_{chat_id}_done")
             ]]
             reply_markup = InlineKeyboardMarkup(new_keyboard)
             
             try:
                 await query.edit_message_caption(
-                    caption="<b>⚪ Step 3 - Select Coin</b>",
+                    caption="<b>Step 3 - Select Coin</b>",
                     reply_markup=reply_markup,
                     parse_mode='HTML'
                 )
@@ -2174,11 +2226,14 @@ async def send_step6_payment_message(bot, send_chat_id: int, chat_id: int) -> No
 
 
 async def send_step2_blockchain_message(bot, send_chat_id: int, chat_id: int) -> None:
-    """Send Step 2 - Blockchain selection message with BSC button"""
+    """Send Step 2 - Blockchain selection message with BSC and TRON buttons"""
     try:
-        step2_text = "<b>🔗 Step 2 - Choose Blockchain</b>"
+        step2_text = "<b>Step 2 - Choose Blockchain</b>"
         
-        keyboard = [[InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}")]]
+        keyboard = [[
+            InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}"),
+            InlineKeyboardButton("TRON", callback_data=f"blockchain_tron_{chat_id}")
+        ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         image_path = "step4_blockchain_image.jpg"
@@ -2216,7 +2271,7 @@ async def send_step2_blockchain_message(bot, send_chat_id: int, chat_id: int) ->
 async def send_step3_coin_message(bot, send_chat_id: int, chat_id: int) -> None:
     """Send Step 3 - Select Coin message with USDT/USDC buttons"""
     try:
-        step3_text = "<b>⚪ Step 3 - Select Coin</b>"
+        step3_text = "<b>Step 3 - Select Coin</b>"
         
         keyboard = [[
             InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}"),
@@ -2435,14 +2490,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             
             # Send Step 7 message (Buyer Wallet Address)
             send_chat_id = -1000000000000 - original_chat_id
-            room_transaction_state[original_chat_id] = 'step7_buyer_address'
             
-            # Get buyer username from room_initiators
+            # Get buyer username from room_initiators or user_roles
             buyer_username = room_initiators.get(original_chat_id, {}).get('buyer')
+            
+            # Fallback to user_roles if room_initiators doesn't have buyer
+            if not buyer_username and original_chat_id in user_roles:
+                for uname, role in user_roles[original_chat_id].items():
+                    if role == 'BUYER':
+                        buyer_username = uname
+                        break
+            
             if buyer_username:
+                # Get selected blockchain for address format hint
+                selected_blockchain = user_blockchain.get(original_chat_id, 'BSC')
+                if selected_blockchain == 'TRON':
+                    address_hint = "starts with T and is 34 chars"
+                else:
+                    address_hint = "starts with 0x and is 42 chars (0x + 40 hex)"
+                
+                step7_text = f"<b>Step 7</b> - @{buyer_username}, enter your {selected_blockchain} wallet address\n{address_hint}"
+                
                 try:
-                    step7_text = f"💰 <b>Step 7</b> - @{buyer_username}, enter your BSC wallet address\nstarts with 0x and is 42 chars (0x + 40 hex)"
-                    
                     image_path = os.path.join(SCRIPT_DIR, "step6_buyer_address_image.jpg")
                     if os.path.exists(image_path):
                         msg = await context.bot.send_photo(
@@ -2461,8 +2530,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                         )
                         buyer_wallet_messages[original_chat_id] = msg.message_id
                         logger.warning(f"⚠️ Sent buyer wallet (text only) to room {original_chat_id} - image not found")
+                    
+                    # Only set state to step7 AFTER successfully sending the message
+                    room_transaction_state[original_chat_id] = 'step7_buyer_address'
+                    
                 except Exception as e:
                     logger.warning(f"Could not send buyer wallet message: {e}")
+                    # Don't change state if message failed to send
+            else:
+                logger.warning(f"Could not find buyer username for room {original_chat_id}")
+                await update.message.reply_text("❌ Could not identify buyer. Please restart the trade with /restart")
             return
         
         # Check if room is waiting for buyer wallet address input
@@ -2474,22 +2551,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     await update.message.reply_text("❌ Only the buyer can provide their wallet address")
                     return
             
-            # Validate wallet address format
-            if not text.startswith('0x'):
-                await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
-                return
+            # Validate wallet address format based on selected blockchain
+            selected_blockchain = user_blockchain.get(original_chat_id, 'BSC')
             
-            if len(text) != 42:
-                await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
-                return
-            
-            # Validate that remaining characters are hex
-            hex_part = text[2:]  # Remove 0x prefix
-            try:
-                int(hex_part, 16)  # Try to parse as hexadecimal
-            except ValueError:
-                await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
-                return
+            if selected_blockchain == 'TRON':
+                # TRON addresses start with T and are 34 characters
+                if not text.startswith('T'):
+                    await update.message.reply_text("❌ Invalid TRON address format. Address must start with T and be 34 characters.")
+                    return
+                if len(text) != 34:
+                    await update.message.reply_text("❌ Invalid TRON address format. Address must start with T and be 34 characters.")
+                    return
+            else:
+                # BSC/ETH addresses start with 0x and are 42 characters
+                if not text.startswith('0x'):
+                    await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
+                    return
+                
+                if len(text) != 42:
+                    await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
+                    return
+                
+                # Validate that remaining characters are hex
+                hex_part = text[2:]  # Remove 0x prefix
+                try:
+                    int(hex_part, 16)  # Try to parse as hexadecimal
+                except ValueError:
+                    await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
+                    return
             
             buyer_addresses[original_chat_id] = text
             save_room_data(original_chat_id)
@@ -2507,7 +2596,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             
             if seller_username:
                 try:
-                    step6_text = f"💰 <b>Step 6</b> - @{seller_username}, enter your BSC wallet address\nto receive refund if deal is cancelled"
+                    # Get selected blockchain for address format hint
+                    selected_blockchain = user_blockchain.get(original_chat_id, 'BSC')
+                    step6_text = f"<b>Step 8</b> - @{seller_username}, enter your {selected_blockchain} wallet address\nto receive refund if deal is cancelled"
                     
                     image_path = "step6_buyer_address_image.jpg"
                     if os.path.exists(image_path):
@@ -2541,22 +2632,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     await update.message.reply_text("❌ Only the seller can provide their wallet address")
                     return
             
-            # Validate wallet address format
-            if not text.startswith('0x'):
-                await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
-                return
+            # Validate wallet address format based on selected blockchain
+            selected_blockchain = user_blockchain.get(original_chat_id, 'BSC')
             
-            if len(text) != 42:
-                await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
-                return
-            
-            # Validate that remaining characters are hex
-            hex_part = text[2:]  # Remove 0x prefix
-            try:
-                int(hex_part, 16)  # Try to parse as hexadecimal
-            except ValueError:
-                await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
-                return
+            if selected_blockchain == 'TRON':
+                # TRON addresses start with T and are 34 characters
+                if not text.startswith('T'):
+                    await update.message.reply_text("❌ Invalid TRON address format. Address must start with T and be 34 characters.")
+                    return
+                if len(text) != 34:
+                    await update.message.reply_text("❌ Invalid TRON address format. Address must start with T and be 34 characters.")
+                    return
+            else:
+                # BSC/ETH addresses start with 0x and are 42 characters
+                if not text.startswith('0x'):
+                    await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
+                    return
+                
+                if len(text) != 42:
+                    await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
+                    return
+                
+                # Validate that remaining characters are hex
+                hex_part = text[2:]  # Remove 0x prefix
+                try:
+                    int(hex_part, 16)  # Try to parse as hexadecimal
+                except ValueError:
+                    await update.message.reply_text("❌ Invalid address format. Address must start with 0x and be 42 characters (0x + 40 hexadecimal characters).")
+                    return
             
             seller_addresses[original_chat_id] = text
             save_room_data(original_chat_id)
