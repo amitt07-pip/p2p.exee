@@ -322,27 +322,8 @@ async def check_and_send_deal_results(application, initiator_username):
                             # Use user invite link if available, fallback to bot link
                             link_to_send = invite_link if invite_link and invite_link not in ['None', 'null', ''] else bot_invite_link
                             
-                            # Calculate fee tier based on user bios containing "@room"
-                            initiator_has_room = False
-                            counterparty_has_room = False
-                            
-                            # Check initiator's bio flag from database
-                            initiator_bio_flag = database.get_user_bio_flag_by_username(initiator_username)
-                            if initiator_bio_flag is not None:
-                                initiator_has_room = initiator_bio_flag
-                            
-                            # Check counterparty's bio flag from database
-                            counterparty_bio_flag = database.get_user_bio_flag_by_username(counterparty_username)
-                            if counterparty_bio_flag is not None:
-                                counterparty_has_room = counterparty_bio_flag
-                            
-                            # Determine fee tier
-                            if initiator_has_room and counterparty_has_room:
-                                fee_tier = "0.25%"
-                            elif initiator_has_room or counterparty_has_room:
-                                fee_tier = "0.5%"
-                            else:
-                                fee_tier = "0.75%"
+                            # Get fee tier from result (calculated by userbot based on user bios)
+                            fee_tier = result.get('fee_tier', '0.75%')
                             
                             # Send message with photo to the GROUP where deal was initiated
                             msg_text = (

@@ -169,8 +169,17 @@ ALL COMMANDS ARE CASE-SENSITIVE
         
         # Fetch and store user bios for service fee calculation
         logger.info(f"📋 Fetching bios for @{initiator_username} and @{counterparty_username}")
-        await fetch_and_store_user_bio(client, initiator_username)
-        await fetch_and_store_user_bio(client, counterparty_username)
+        initiator_has_room = await fetch_and_store_user_bio(client, initiator_username)
+        counterparty_has_room = await fetch_and_store_user_bio(client, counterparty_username)
+        
+        # Calculate fee tier based on bios
+        if initiator_has_room and counterparty_has_room:
+            fee_tier = "0.25%"
+        elif initiator_has_room or counterparty_has_room:
+            fee_tier = "0.5%"
+        else:
+            fee_tier = "0.75%"
+        logger.info(f"💰 Fee tier calculated: {fee_tier} (initiator_has_room={initiator_has_room}, counterparty_has_room={counterparty_has_room})")
         
         # Store initial deal room info immediately (before bot joins)
         deal_rooms[chat_id] = {
@@ -364,7 +373,8 @@ ALL COMMANDS ARE CASE-SENSITIVE
             'counterparty_username': counterparty_username,
             'invite_link': str(invite_link),
             'chat_id': chat_id,
-            'bot_invite_link': bot_invite_link
+            'bot_invite_link': bot_invite_link,
+            'fee_tier': fee_tier
         }
         
         # Update deal room info file with final details
@@ -411,11 +421,12 @@ async def process_deal_requests(client):
                     
                     if chat_id:
                         bot_invite_link = deal_rooms.get(chat_id, {}).get('bot_invite_link', '')
+                        fee_tier = deal_rooms.get(chat_id, {}).get('fee_tier', '0.75%')
                         update_request_status(
                             initiator_username,
                             counterparty_username,
                             'completed',
-                            {'chat_id': chat_id, 'room_name': room_name, 'invite_link': str(invite_link), 'bot_invite_link': bot_invite_link}
+                            {'chat_id': chat_id, 'room_name': room_name, 'invite_link': str(invite_link), 'bot_invite_link': bot_invite_link, 'fee_tier': fee_tier}
                         )
                     else:
                         update_request_status(
