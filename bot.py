@@ -409,23 +409,17 @@ async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
     
-    buyer_username = room_initiators[original_chat_id].get('buyer', "Unknown")
     seller_username = room_initiators[original_chat_id].get('seller', "Unknown")
     
-    # Initialize release approvals if not already done
-    if original_chat_id not in release_approvals:
-        release_approvals[original_chat_id] = {'buyer': 'waiting', 'seller': 'waiting'}
-    else:
-        # Reset statuses for new release request
-        release_approvals[original_chat_id] = {'buyer': 'waiting', 'seller': 'waiting'}
+    # Initialize release approvals - only seller needs to approve now
+    release_approvals[original_chat_id] = {'seller': 'waiting'}
     
-    # Create release confirmation message
-    release_text = f"""<b>Release Confirmation</b>
+    # Create release confirmation message - seller only
+    release_text = f"""<b>Release Confirmation (Full)</b>
 
-⌛️ @{buyer_username} - Waiting...
 ⌛️ @{seller_username} - Waiting...
 
-<b>Both users must approve to release payment.</b>"""
+Only the seller needs to approve to release payment."""
     
     # Create buttons
     keyboard = [
@@ -1016,147 +1010,212 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = query.from_user.id
     username = query.from_user.username or query.from_user.first_name
     
-    # Handle release approval
+    # Handle release approval - seller only
     if query.data.startswith('approve_release_'):
         try:
             original_chat_id = int(query.data.split('_')[2])
             send_chat_id = -1000000000000 - original_chat_id
             
-            # Check if user is buyer or seller
+            # Get seller info - only seller can approve release
             buyer_username = room_initiators.get(original_chat_id, {}).get('buyer', '')
             seller_username = room_initiators.get(original_chat_id, {}).get('seller', '')
             
-            username_lower = username.lower()
-            user_role = None
+            # Try to get seller_user_id from database for more reliable check
+            deal_data = database.get_deal(original_chat_id)
+            seller_user_id = deal_data.get('seller_user_id') if deal_data else None
             
-            if buyer_username and username_lower == buyer_username.lower():
-                user_role = 'buyer'
-            elif seller_username and username_lower == seller_username.lower():
-                user_role = 'seller'
+            # Check if user is seller (prefer user_id check, fallback to username)
+            is_seller = False
+            if seller_user_id and user_id == seller_user_id:
+                is_seller = True
+            elif seller_username and (username.lower() == seller_username.lower()):
+                is_seller = True
             
-            if user_role is None:
-                await query.answer("❌ You are not authorized", show_alert=True)
+            if not is_seller:
+                await query.answer("❌ Only the seller can approve release", show_alert=True)
                 return CHOOSING
             
             # Update approval status
             if original_chat_id not in release_approvals:
-                release_approvals[original_chat_id] = {'buyer': 'waiting', 'seller': 'waiting'}
+                release_approvals[original_chat_id] = {'seller': 'waiting'}
             
-            release_approvals[original_chat_id][user_role] = 'approved'
-            buyer_status = release_approvals[original_chat_id].get('buyer', 'waiting')
-            seller_status = release_approvals[original_chat_id].get('seller', 'waiting')
+            release_approvals[original_chat_id]['seller'] = 'approved'
             
             # Save release approval to database
-            database.approve_release(original_chat_id, user_role)
+            database.approve_release(original_chat_id, 'seller')
             
-            # Build status emojis and text
-            buyer_emoji = '✅' if buyer_status == 'approved' else '❌' if buyer_status == 'rejected' else '⌛️'
-            seller_emoji = '✅' if seller_status == 'approved' else '❌' if seller_status == 'rejected' else '⌛️'
-            
-            buyer_text = 'Confirmed' if buyer_status == 'approved' else 'Rejected' if buyer_status == 'rejected' else 'Waiting...'
-            seller_text = 'Confirmed' if seller_status == 'approved' else 'Rejected' if seller_status == 'rejected' else 'Waiting...'
-            
-            updated_text = f"""<b>Release Confirmation</b>
+            # Step 1: Edit message to show seller confirmed
+            confirmed_text = f"""<b>Release Confirmation</b>
 
-{buyer_emoji} @{buyer_username} - {buyer_text}
-{seller_emoji} @{seller_username} - {seller_text}
+✅ @{seller_username} - Confirmed
 
-<b>Both users must approve to release payment.</b>"""
+✅ All approvals received. Processing release..."""
             
-            # Check if both approved
-            both_approved = buyer_status == 'approved' and seller_status == 'approved'
-            
-            if both_approved:
-                # Edit message with just group id
-                final_text = str(send_chat_id)
-                
-                # Send deal complete message
-                buyer_addr = buyer_addresses.get(original_chat_id, "0xUnknown")
-                await send_deal_complete_message(context.bot, send_chat_id, original_chat_id, buyer_addr)
-                logger.info(f"✅ Deal complete message sent to room {original_chat_id}")
-                
-                # Mark deal as completed in database
-                database.complete_deal(original_chat_id)
-                
-                # Send notification to logs channel
+            if original_chat_id in release_messages:
+                msg_id = release_messages[original_chat_id]
                 try:
-                    # Get deal amount from database or in-memory
-                    deal_data = database.get_deal(original_chat_id)
-                    amount = deal_data.get('amount') if deal_data else None
-                    coin = deal_data.get('coin', 'USDT') if deal_data else 'USDT'
-                    
-                    if amount is None:
-                        for uid, amt in user_amounts.items():
-                            amount = amt
-                            break
-                    
-                    amount_str = f"{amount} {coin}" if amount else "N/A"
-                    
-                    # Generate invite link for the group
-                    try:
-                        invite_link = await context.bot.create_chat_invite_link(
-                            chat_id=send_chat_id,
-                            name="Deal Completed Link"
-                        )
-                        group_link = invite_link.invite_link
-                    except Exception as e:
-                        logger.warning(f"Could not generate invite link: {e}")
-                        group_link = "Unable to generate link"
-                    
-                    completion_notification = (
-                        f"Deal Completed ✅\n\n"
-                        f"Buyer - @{buyer_username}\n"
-                        f"Seller - @{seller_username}\n"
-                        f"Amount - {amount_str}\n"
-                        f"Group Link - {group_link}"
+                    await context.bot.edit_message_caption(
+                        chat_id=send_chat_id,
+                        message_id=msg_id,
+                        caption=confirmed_text,
+                        parse_mode='HTML',
+                        reply_markup=None
                     )
-                    
-                    await context.bot.send_message(
-                        chat_id=-1003266978268,
-                        text=completion_notification
-                    )
-                    logger.info(f"✅ Sent deal completion notification to logs channel for room {original_chat_id}")
+                    logger.info(f"✅ Updated release confirmation to 'Processing' in room {original_chat_id}")
                 except Exception as e:
-                    logger.warning(f"Could not send completion notification to logs channel: {e}")
-                
-                # Update release confirmation message with just group id
-                if original_chat_id in release_messages:
-                    msg_id = release_messages[original_chat_id]
-                    try:
-                        await context.bot.edit_message_caption(
-                            chat_id=send_chat_id,
-                            message_id=msg_id,
-                            caption=final_text,
-                            parse_mode='HTML',
-                            reply_markup=None
-                        )
-                        logger.info(f"✅ Edited release confirmation message with group id in room {original_chat_id}")
-                    except Exception as e:
-                        logger.warning(f"Could not edit release confirmation: {e}")
-            else:
-                # Keep buttons
-                keyboard = [
-                    [InlineKeyboardButton("✅ Approve", callback_data=f"approve_release_{original_chat_id}"),
-                     InlineKeyboardButton("❌ Decline", callback_data=f"decline_release_{original_chat_id}")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                # Update message
-                if original_chat_id in release_messages:
-                    msg_id = release_messages[original_chat_id]
-                    try:
-                        await context.bot.edit_message_caption(
-                            chat_id=send_chat_id,
-                            message_id=msg_id,
-                            caption=updated_text,
-                            parse_mode='HTML',
-                            reply_markup=reply_markup
-                        )
-                        logger.info(f"✅ Updated release confirmation in room {original_chat_id}")
-                    except Exception as e:
-                        logger.warning(f"Could not edit release confirmation: {e}")
+                    logger.warning(f"Could not edit release confirmation: {e}")
             
-            await query.answer(f"✅ Approved!")
+            # Step 2: Edit message to show just group chat id
+            final_text = str(send_chat_id)
+            
+            if original_chat_id in release_messages:
+                msg_id = release_messages[original_chat_id]
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=send_chat_id,
+                        message_id=msg_id,
+                        caption=final_text,
+                        parse_mode='HTML',
+                        reply_markup=None
+                    )
+                    logger.info(f"✅ Edited release confirmation message with group id in room {original_chat_id}")
+                except Exception as e:
+                    logger.warning(f"Could not edit release confirmation to group id: {e}")
+            
+            # Step 3: Calculate fees and send Partial Release Complete message
+            buyer_addr = buyer_addresses.get(original_chat_id, "0xUnknown")
+            
+            # Get deal data for calculations
+            amount = float(deal_data.get('amount', 0)) if deal_data else 0
+            coin = deal_data.get('coin', 'USDT') if deal_data else 'USDT'
+            chain = deal_data.get('network', 'BSC') if deal_data else user_blockchain.get(original_chat_id, 'BSC')
+            
+            # Fallback to in-memory if no DB data
+            if amount == 0:
+                for uid, amt in user_amounts.items():
+                    amount = float(amt)
+                    break
+            if not coin or coin == 'USDT':
+                coin = user_coins.get(original_chat_id, 'USDT')
+            
+            # Calculate network fee based on chain
+            if chain == 'TRON':
+                network_fee = 3.0
+            else:  # BSC
+                network_fee = 0.2
+            
+            # Calculate service fee based on user bios
+            buyer_has_room = False
+            seller_has_room = False
+            
+            buyer_user_id_db = get_user_id(buyer_username) if buyer_username else None
+            seller_user_id_db = get_user_id(seller_username) if seller_username else None
+            
+            if buyer_user_id_db:
+                buyer_bio_flag = database.get_user_bio_flag(buyer_user_id_db)
+                if buyer_bio_flag is not None:
+                    buyer_has_room = buyer_bio_flag
+            elif buyer_username:
+                buyer_bio_flag = database.get_user_bio_flag_by_username(buyer_username)
+                if buyer_bio_flag is not None:
+                    buyer_has_room = buyer_bio_flag
+            
+            if seller_user_id_db:
+                seller_bio_flag = database.get_user_bio_flag(seller_user_id_db)
+                if seller_bio_flag is not None:
+                    seller_has_room = seller_bio_flag
+            elif seller_username:
+                seller_bio_flag = database.get_user_bio_flag_by_username(seller_username)
+                if seller_bio_flag is not None:
+                    seller_has_room = seller_bio_flag
+            
+            # Determine service fee percentage
+            if buyer_has_room and seller_has_room:
+                service_fee_percent = 0.25
+            elif buyer_has_room or seller_has_room:
+                service_fee_percent = 0.5
+            else:
+                service_fee_percent = 0.75
+            
+            service_fee_amount = amount * (service_fee_percent / 100)
+            
+            # Calculate amount released
+            amount_released = amount - network_fee - service_fee_amount
+            
+            # Build transaction link based on chain
+            if chain == 'TRON':
+                tx_url = f"https://tronscan.org/#/address/{buyer_addr}"
+            else:  # BSC
+                tx_url = f"https://bscscan.com/address/{buyer_addr}"
+            
+            # Format the Partial Release Complete message
+            partial_release_text = f"""✅ <b>Partial Release Complete!</b>
+
+Amount Released: {amount_released:.4f} {coin}
+Remaining: {network_fee:.4f} {coin}
+🔗 Transaction: <a href="{tx_url}">Click Here</a>"""
+            
+            # Create close deal button
+            keyboard = [[InlineKeyboardButton("❌ Close Deal", callback_data=f"close_deal_{original_chat_id}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Send the Partial Release Complete message
+            image_path = os.path.join(SCRIPT_DIR, "deal_complete_image.jpg")
+            try:
+                if os.path.exists(image_path):
+                    await context.bot.send_photo(
+                        chat_id=send_chat_id,
+                        photo=open(image_path, 'rb'),
+                        caption=partial_release_text,
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=send_chat_id,
+                        text=partial_release_text,
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
+                logger.info(f"✅ Sent Partial Release Complete message to room {original_chat_id}")
+            except Exception as e:
+                logger.warning(f"Could not send Partial Release Complete message: {e}")
+            
+            # Mark deal as completed in database
+            database.complete_deal(original_chat_id)
+            
+            # Send notification to logs channel
+            try:
+                amount_str = f"{amount} {coin}" if amount else "N/A"
+                
+                # Generate invite link for the group
+                try:
+                    invite_link = await context.bot.create_chat_invite_link(
+                        chat_id=send_chat_id,
+                        name="Deal Completed Link"
+                    )
+                    group_link = invite_link.invite_link
+                except Exception as e:
+                    logger.warning(f"Could not generate invite link: {e}")
+                    group_link = "Unable to generate link"
+                
+                completion_notification = (
+                    f"Deal Completed ✅\n\n"
+                    f"Buyer - @{buyer_username}\n"
+                    f"Seller - @{seller_username}\n"
+                    f"Amount - {amount_str}\n"
+                    f"Group Link - {group_link}"
+                )
+                
+                await context.bot.send_message(
+                    chat_id=-1003266978268,
+                    text=completion_notification
+                )
+                logger.info(f"✅ Sent deal completion notification to logs channel for room {original_chat_id}")
+            except Exception as e:
+                logger.warning(f"Could not send completion notification to logs channel: {e}")
+            
+            await query.answer(f"✅ Release approved!")
             return CHOOSING
         except Exception as e:
             logger.warning(f"❌ Error handling release approval: {e}")
@@ -1222,114 +1281,64 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer("❌ Error", show_alert=True)
             return CHOOSING
     
-    # Handle release decline
+    # Handle release decline - seller only
     elif query.data.startswith('decline_release_'):
         try:
             original_chat_id = int(query.data.split('_')[2])
             send_chat_id = -1000000000000 - original_chat_id
             
-            # Check if user is buyer or seller
-            buyer_username = room_initiators.get(original_chat_id, {}).get('buyer', '')
+            # Get seller info - only seller can decline release
             seller_username = room_initiators.get(original_chat_id, {}).get('seller', '')
             
-            username_lower = username.lower()
-            user_role = None
+            # Try to get seller_user_id from database for more reliable check
+            deal_data = database.get_deal(original_chat_id)
+            seller_user_id = deal_data.get('seller_user_id') if deal_data else None
             
-            if buyer_username and username_lower == buyer_username.lower():
-                user_role = 'buyer'
-            elif seller_username and username_lower == seller_username.lower():
-                user_role = 'seller'
+            # Check if user is seller (prefer user_id check, fallback to username)
+            is_seller = False
+            if seller_user_id and user_id == seller_user_id:
+                is_seller = True
+            elif seller_username and (username.lower() == seller_username.lower()):
+                is_seller = True
             
-            if user_role is None:
-                await query.answer("❌ You are not authorized", show_alert=True)
+            if not is_seller:
+                await query.answer("❌ Only the seller can decline release", show_alert=True)
                 return CHOOSING
             
             # Update rejection status
             if original_chat_id not in release_approvals:
-                release_approvals[original_chat_id] = {'buyer': 'waiting', 'seller': 'waiting'}
+                release_approvals[original_chat_id] = {'seller': 'waiting'}
             
-            release_approvals[original_chat_id][user_role] = 'rejected'
-            buyer_status = release_approvals[original_chat_id].get('buyer', 'waiting')
-            seller_status = release_approvals[original_chat_id].get('seller', 'waiting')
+            release_approvals[original_chat_id]['seller'] = 'rejected'
             
-            # Check if one approved and one rejected
-            one_approved_one_rejected = (
-                (buyer_status == 'approved' and seller_status == 'rejected') or
-                (buyer_status == 'rejected' and seller_status == 'approved')
-            )
+            # Update message to show seller declined
+            declined_text = f"""<b>Release Confirmation (Full)</b>
+
+❌ @{seller_username} - Declined
+
+Release has been declined by the seller."""
             
-            if one_approved_one_rejected:
-                # Just update message showing conflict
-                buyer_emoji = '✅' if buyer_status == 'approved' else '❌' if buyer_status == 'rejected' else '⌛️'
-                seller_emoji = '✅' if seller_status == 'approved' else '❌' if seller_status == 'rejected' else '⌛️'
-                
-                buyer_text = 'Confirmed' if buyer_status == 'approved' else 'Rejected' if buyer_status == 'rejected' else 'Waiting...'
-                seller_text = 'Confirmed' if seller_status == 'approved' else 'Rejected' if seller_status == 'rejected' else 'Waiting...'
-                
-                conflict_text = f"""<b>Release Confirmation</b>
-
-{buyer_emoji} @{buyer_username} - {buyer_text}
-{seller_emoji} @{seller_username} - {seller_text}
-
-<b>Both users must approve to release payment.</b>"""
-                
-                # Keep buttons
-                keyboard = [
-                    [InlineKeyboardButton("✅ Approve", callback_data=f"approve_release_{original_chat_id}"),
-                     InlineKeyboardButton("❌ Decline", callback_data=f"decline_release_{original_chat_id}")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                # Update message
-                if original_chat_id in release_messages:
-                    msg_id = release_messages[original_chat_id]
-                    try:
-                        await context.bot.edit_message_caption(
-                            chat_id=send_chat_id,
-                            message_id=msg_id,
-                            caption=conflict_text,
-                            parse_mode='HTML',
-                            reply_markup=reply_markup
-                        )
-                        logger.info(f"✅ Updated release confirmation with conflict in room {original_chat_id}")
-                    except Exception as e:
-                        logger.warning(f"Could not update release message: {e}")
-            else:
-                # Build status emojis and text
-                buyer_emoji = '✅' if buyer_status == 'approved' else '❌' if buyer_status == 'rejected' else '⌛️'
-                seller_emoji = '✅' if seller_status == 'approved' else '❌' if seller_status == 'rejected' else '⌛️'
-                
-                buyer_text = 'Confirmed' if buyer_status == 'approved' else 'Rejected' if buyer_status == 'rejected' else 'Waiting...'
-                seller_text = 'Confirmed' if seller_status == 'approved' else 'Rejected' if seller_status == 'rejected' else 'Waiting...'
-                
-                updated_text = f"""<b>Release Confirmation</b>
-
-{buyer_emoji} @{buyer_username} - {buyer_text}
-{seller_emoji} @{seller_username} - {seller_text}
-
-<b>Both users must approve to release payment.</b>"""
-                
-                # Keep buttons
-                keyboard = [
-                    [InlineKeyboardButton("✅ Approve", callback_data=f"approve_release_{original_chat_id}"),
-                     InlineKeyboardButton("❌ Decline", callback_data=f"decline_release_{original_chat_id}")]
-                ]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                
-                # Update message
-                if original_chat_id in release_messages:
-                    msg_id = release_messages[original_chat_id]
-                    try:
-                        await context.bot.edit_message_caption(
-                            chat_id=send_chat_id,
-                            message_id=msg_id,
-                            caption=updated_text,
-                            parse_mode='HTML',
-                            reply_markup=reply_markup
-                        )
-                        logger.info(f"✅ Updated release confirmation in room {original_chat_id}")
-                    except Exception as e:
-                        logger.warning(f"Could not edit release confirmation: {e}")
+            # Keep buttons so seller can change their mind
+            keyboard = [
+                [InlineKeyboardButton("✅ Approve", callback_data=f"approve_release_{original_chat_id}"),
+                 InlineKeyboardButton("❌ Decline", callback_data=f"decline_release_{original_chat_id}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Update message
+            if original_chat_id in release_messages:
+                msg_id = release_messages[original_chat_id]
+                try:
+                    await context.bot.edit_message_caption(
+                        chat_id=send_chat_id,
+                        message_id=msg_id,
+                        caption=declined_text,
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
+                    logger.info(f"✅ Updated release confirmation to 'Declined' in room {original_chat_id}")
+                except Exception as e:
+                    logger.warning(f"Could not update release message: {e}")
             
             await query.answer(f"❌ Declined!")
             return CHOOSING
