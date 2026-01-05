@@ -266,14 +266,16 @@ ALL COMMANDS ARE CASE-SENSITIVE
                                 logger.warning(f"Could not add/promote admin account: {e}")
                             
                             # Delete only initial system messages (first 3) when group is created
+                            # NOTE: Only delete true service messages (action + no text) to preserve bot messages
                             try:
                                 await asyncio.sleep(0.5)  # Small delay to ensure system messages are created
                                 
-                                # Only collect system messages (service messages with action)
+                                # Only collect TRUE system messages (service messages with action AND no text content)
                                 system_msg_ids = []
                                 async for msg in client.iter_messages(chat_id, limit=20):
-                                    # Check if it's a system message (has action property)
-                                    if msg.action is not None:
+                                    # Check if it's a TRUE system message (has action AND no text/message content)
+                                    # This ensures we don't delete bot messages like "Waiting for @username"
+                                    if msg.action is not None and (msg.message is None or msg.message == ''):
                                         system_msg_ids.append(msg.id)
                                         # Only collect first 3 system messages
                                         if len(system_msg_ids) >= 3:
