@@ -823,7 +823,127 @@ def load_all_wallets() -> Dict[int, Dict[str, Dict[str, str]]]:
         return {}
 
 
+# ============================================================================
+# USER BIO FLAGS (for service fee calculation)
+# ============================================================================
+
+def init_user_bio_flags_table():
+    """Initialize the user_bio_flags table for storing @room bio status"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.warning("Could not connect to database for bio flags table")
+            return False
+        
+        cur = conn.cursor()
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_bio_flags (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT UNIQUE NOT NULL,
+                username VARCHAR(100),
+                has_room_bio BOOLEAN DEFAULT FALSE,
+                checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_bio_flags_user_id ON user_bio_flags(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_bio_flags_username ON user_bio_flags(username)")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("User bio flags table initialized successfully")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not initialize user bio flags table: {e}")
+        return False
+
+
+def upsert_user_bio_flag(user_id: int, username: str, has_room_bio: bool) -> bool:
+    """Save or update a user's @room bio flag"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO user_bio_flags (user_id, username, has_room_bio, checked_at, updated_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                has_room_bio = EXCLUDED.has_room_bio,
+                checked_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+        """, (user_id, username, has_room_bio))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        logger.info(f"Saved bio flag for user {user_id} (@{username}): has_room={has_room_bio}")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not save user bio flag: {e}")
+        return False
+
+
+def get_user_bio_flag(user_id: int) -> Optional[bool]:
+    """Get a user's @room bio flag by user_id. Returns None if not found."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT has_room_bio FROM user_bio_flags WHERE user_id = %s
+        """, (user_id,))
+        
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if row:
+            return row['has_room_bio']
+        return None
+    except Exception as e:
+        logger.warning(f"Could not get user bio flag: {e}")
+        return None
+
+
+def get_user_bio_flag_by_username(username: str) -> Optional[bool]:
+    """Get a user's @room bio flag by username. Returns None if not found."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        
+        # Remove @ if present
+        username = username.lstrip('@')
+        
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT has_room_bio FROM user_bio_flags WHERE LOWER(username) = LOWER(%s)
+        """, (username,))
+        
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if row:
+            return row['has_room_bio']
+        return None
+    except Exception as e:
+        logger.warning(f"Could not get user bio flag by username: {e}")
+        return None
+
+
 # Initialize database on module import
 if __name__ != "__main__":
     init_database()
     init_user_wallets_table()
+    init_user_bio_flags_table()

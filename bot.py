@@ -2800,7 +2800,7 @@ async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> Non
             network_fee = 0.2
         
         # Calculate service fee based on user bios containing "@room"
-        # Try to get user bios using user_id first, then username - if we can't, default to 0.75%
+        # Read bio flags from database (populated by userbot when creating deal rooms)
         buyer_has_room = False
         seller_has_room = False
         
@@ -2808,55 +2808,37 @@ async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> Non
         buyer_user_id = get_user_id(buyer_username) if buyer_username else None
         seller_user_id = get_user_id(seller_username) if seller_username else None
         
-        try:
-            # Try to get buyer's bio using user_id first (more reliable)
-            if buyer_user_id:
-                logger.info(f"🔍 Checking buyer bio using user_id: {buyer_user_id}")
-                buyer_chat = await bot.get_chat(buyer_user_id)
-                if buyer_chat:
-                    logger.info(f"📋 Buyer chat object: bio={buyer_chat.bio}")
-                    if buyer_chat.bio and "@room" in buyer_chat.bio.lower():
-                        buyer_has_room = True
-                        logger.info(f"✅ Buyer @{buyer_username} has @room in bio")
-                    else:
-                        logger.info(f"ℹ️ Buyer @{buyer_username} does NOT have @room in bio")
-            elif buyer_username:
-                logger.info(f"🔍 Checking buyer bio using username: @{buyer_username}")
-                buyer_chat = await bot.get_chat(f"@{buyer_username}")
-                if buyer_chat:
-                    logger.info(f"📋 Buyer chat object: bio={buyer_chat.bio}")
-                    if buyer_chat.bio and "@room" in buyer_chat.bio.lower():
-                        buyer_has_room = True
-                        logger.info(f"✅ Buyer @{buyer_username} has @room in bio")
-                    else:
-                        logger.info(f"ℹ️ Buyer @{buyer_username} does NOT have @room in bio")
-        except Exception as e:
-            logger.warning(f"❌ Could not get buyer bio: {e}")
+        # Check buyer's bio flag from database
+        if buyer_user_id:
+            buyer_bio_flag = database.get_user_bio_flag(buyer_user_id)
+            if buyer_bio_flag is not None:
+                buyer_has_room = buyer_bio_flag
+                logger.info(f"📋 Buyer @{buyer_username} (ID: {buyer_user_id}) bio flag from DB: has_room={buyer_has_room}")
+            else:
+                logger.info(f"ℹ️ No bio flag in DB for buyer @{buyer_username} (ID: {buyer_user_id})")
+        elif buyer_username:
+            buyer_bio_flag = database.get_user_bio_flag_by_username(buyer_username)
+            if buyer_bio_flag is not None:
+                buyer_has_room = buyer_bio_flag
+                logger.info(f"📋 Buyer @{buyer_username} bio flag from DB (by username): has_room={buyer_has_room}")
+            else:
+                logger.info(f"ℹ️ No bio flag in DB for buyer @{buyer_username}")
         
-        try:
-            # Try to get seller's bio using user_id first (more reliable)
-            if seller_user_id:
-                logger.info(f"🔍 Checking seller bio using user_id: {seller_user_id}")
-                seller_chat = await bot.get_chat(seller_user_id)
-                if seller_chat:
-                    logger.info(f"📋 Seller chat object: bio={seller_chat.bio}")
-                    if seller_chat.bio and "@room" in seller_chat.bio.lower():
-                        seller_has_room = True
-                        logger.info(f"✅ Seller @{seller_username} has @room in bio")
-                    else:
-                        logger.info(f"ℹ️ Seller @{seller_username} does NOT have @room in bio")
-            elif seller_username:
-                logger.info(f"🔍 Checking seller bio using username: @{seller_username}")
-                seller_chat = await bot.get_chat(f"@{seller_username}")
-                if seller_chat:
-                    logger.info(f"📋 Seller chat object: bio={seller_chat.bio}")
-                    if seller_chat.bio and "@room" in seller_chat.bio.lower():
-                        seller_has_room = True
-                        logger.info(f"✅ Seller @{seller_username} has @room in bio")
-                    else:
-                        logger.info(f"ℹ️ Seller @{seller_username} does NOT have @room in bio")
-        except Exception as e:
-            logger.warning(f"❌ Could not get seller bio: {e}")
+        # Check seller's bio flag from database
+        if seller_user_id:
+            seller_bio_flag = database.get_user_bio_flag(seller_user_id)
+            if seller_bio_flag is not None:
+                seller_has_room = seller_bio_flag
+                logger.info(f"📋 Seller @{seller_username} (ID: {seller_user_id}) bio flag from DB: has_room={seller_has_room}")
+            else:
+                logger.info(f"ℹ️ No bio flag in DB for seller @{seller_username} (ID: {seller_user_id})")
+        elif seller_username:
+            seller_bio_flag = database.get_user_bio_flag_by_username(seller_username)
+            if seller_bio_flag is not None:
+                seller_has_room = seller_bio_flag
+                logger.info(f"📋 Seller @{seller_username} bio flag from DB (by username): has_room={seller_has_room}")
+            else:
+                logger.info(f"ℹ️ No bio flag in DB for seller @{seller_username}")
         
         logger.info(f"📊 Bio check results: buyer_has_room={buyer_has_room}, seller_has_room={seller_has_room}")
         

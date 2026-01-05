@@ -12,10 +12,12 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.tl.functions.channels import CreateChannelRequest, EditPhotoRequest, InviteToChannelRequest, EditAdminRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
+from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import ChatAdminRights, InputChatPhoto, InputPhoto
 import requests
 from telethon.errors import SessionPasswordNeededError
 from image_generator import generate_room_image
+import database
 
 # Load environment variables
 load_dotenv()
@@ -106,6 +108,31 @@ def update_request_status(initiator_username, counterparty_username, status, res
         logger.error(f"Error updating request status: {e}")
 
 
+async def fetch_and_store_user_bio(client, username: str) -> bool:
+    """Fetch a user's bio using Telethon and store the @room flag in database.
+    Returns True if user has @room in bio, False otherwise."""
+    try:
+        # Get user entity by username
+        username_clean = username.lstrip('@')
+        entity = await client.get_entity(f"@{username_clean}")
+        
+        # Get full user info including bio
+        full_user = await client(GetFullUserRequest(entity.id))
+        bio = full_user.full_user.about or ""
+        
+        # Check if bio contains @room
+        has_room = "@room" in bio.lower()
+        
+        # Store in database
+        database.upsert_user_bio_flag(entity.id, username_clean, has_room)
+        
+        logger.info(f"📋 Bio check for @{username_clean} (ID: {entity.id}): has_room={has_room}")
+        return has_room
+    except Exception as e:
+        logger.warning(f"Could not fetch bio for @{username}: {e}")
+        return False
+
+
 async def create_deal_room(client, initiator_username, counterparty_username, bot_token):
     """Create a deal room - NO MESSAGES SENT, ONLY GROUP CREATION"""
     global room_counter
@@ -139,6 +166,11 @@ ALL COMMANDS ARE CASE-SENSITIVE
         
         chat_id = result.chats[0].id
         logger.info(f"✅ Group Created: {room_name} (ID: {chat_id})")
+        
+        # Fetch and store user bios for service fee calculation
+        logger.info(f"📋 Fetching bios for @{initiator_username} and @{counterparty_username}")
+        await fetch_and_store_user_bio(client, initiator_username)
+        await fetch_and_store_user_bio(client, counterparty_username)
         
         # Store initial deal room info immediately (before bot joins)
         deal_rooms[chat_id] = {
