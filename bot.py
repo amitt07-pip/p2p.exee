@@ -800,30 +800,56 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 # Virtual wallet data storage (in-memory, will be replaced with DB later)
-# Structure: {user_id: {'usdt_bsc': float, 'usdt_tron': float, 'usdc_bsc': float, 'transactions': []}}
+# Structure: {user_id: {'usdt_bsc': float, 'usdt_tron': float, 'usdc_bsc': float, 'bnb_bsc': float, 'trx_tron': float, 'transactions': []}}
 virtual_wallets = {}
 
 # Authorized user IDs for virtual wallet
 WALLET_AUTHORIZED_USERS = [6864194951, 7338429782]
 
-# Wallet network types
-WALLET_NETWORKS = {
+# Wallet token types with display names
+WALLET_TOKENS = {
     'usdt_bsc': 'USDT (BSC)',
     'usdt_tron': 'USDT (TRON)',
-    'usdc_bsc': 'USDC (BSC)'
+    'usdc_bsc': 'USDC (BSC)',
+    'bnb_bsc': 'BNB (BSC)',
+    'trx_tron': 'TRX (TRON)'
+}
+
+# Deposit addresses per network (configurable - admin can set these)
+# These are the addresses where users should send deposits
+WALLET_DEPOSIT_ADDRESSES = {
+    'bsc': os.getenv('WALLET_BSC_DEPOSIT_ADDRESS', '0x0000000000000000000000000000000000000000'),
+    'tron': os.getenv('WALLET_TRON_DEPOSIT_ADDRESS', 'T0000000000000000000000000000000000')
+}
+
+# Map tokens to their network for deposit address lookup
+TOKEN_NETWORK_MAP = {
+    'usdt_bsc': 'bsc',
+    'usdc_bsc': 'bsc',
+    'bnb_bsc': 'bsc',
+    'usdt_tron': 'tron',
+    'trx_tron': 'tron'
 }
 
 
 def init_wallet(user_id: int) -> dict:
-    """Initialize a new wallet with all network balances"""
+    """Initialize a new wallet with all token balances"""
     if user_id not in virtual_wallets:
         virtual_wallets[user_id] = {
             'usdt_bsc': 0.0,
             'usdt_tron': 0.0,
             'usdc_bsc': 0.0,
+            'bnb_bsc': 0.0,
+            'trx_tron': 0.0,
             'transactions': []
         }
-    return virtual_wallets[user_id]
+    # Ensure existing wallets have new tokens
+    wallet = virtual_wallets[user_id]
+    if 'bnb_bsc' not in wallet:
+        wallet['bnb_bsc'] = 0.0
+    if 'trx_tron' not in wallet:
+        wallet['trx_tron'] = 0.0
+    return wallet
 
 
 async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -846,7 +872,7 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Initialize wallet if not exists
     wallet = init_wallet(user.id)
     
-    # Create wallet message with multi-network balances
+    # Create wallet message with all token balances
     wallet_text = (
         f"💰 <b>Virtual Wallet</b>\n\n"
         f"<b>User:</b> @{user.username}\n"
@@ -854,7 +880,9 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"<b>Balances:</b>\n"
         f"├ USDT (BSC): <code>{wallet['usdt_bsc']:.2f}</code>\n"
         f"├ USDT (TRON): <code>{wallet['usdt_tron']:.2f}</code>\n"
-        f"└ USDC (BSC): <code>{wallet['usdc_bsc']:.2f}</code>\n\n"
+        f"├ USDC (BSC): <code>{wallet['usdc_bsc']:.2f}</code>\n"
+        f"├ BNB (BSC): <code>{wallet['bnb_bsc']:.4f}</code>\n"
+        f"└ TRX (TRON): <code>{wallet['trx_tron']:.2f}</code>\n\n"
         f"Select an option below:"
     )
     
@@ -1954,16 +1982,24 @@ Once you've sent the amount, tap the button below."""
             # Initialize wallet if not exists
             wallet = init_wallet(user_id)
             
+            # Helper function to format all balances
+            def format_balances():
+                return (
+                    f"├ USDT (BSC): <code>{wallet['usdt_bsc']:.2f}</code>\n"
+                    f"├ USDT (TRON): <code>{wallet['usdt_tron']:.2f}</code>\n"
+                    f"├ USDC (BSC): <code>{wallet['usdc_bsc']:.2f}</code>\n"
+                    f"├ BNB (BSC): <code>{wallet['bnb_bsc']:.4f}</code>\n"
+                    f"└ TRX (TRON): <code>{wallet['trx_tron']:.2f}</code>"
+                )
+            
             if action == 'refresh':
-                # Refresh wallet display with multi-network balances
+                # Refresh wallet display with all token balances
                 wallet_text = (
                     f"💰 <b>Virtual Wallet</b>\n\n"
                     f"<b>User:</b> @{username}\n"
                     f"<b>User ID:</b> <code>{user_id}</code>\n\n"
                     f"<b>Balances:</b>\n"
-                    f"├ USDT (BSC): <code>{wallet['usdt_bsc']:.2f}</code>\n"
-                    f"├ USDT (TRON): <code>{wallet['usdt_tron']:.2f}</code>\n"
-                    f"└ USDC (BSC): <code>{wallet['usdc_bsc']:.2f}</code>\n\n"
+                    f"{format_balances()}\n\n"
                     f"Select an option below:"
                 )
                 
@@ -1987,20 +2023,20 @@ Once you've sent the amount, tap the button below."""
                 await query.answer("✅ Refreshed")
                 
             elif action == 'deposit':
-                # Show deposit network selection
+                # Show deposit token selection
                 deposit_text = (
                     f"💵 <b>Deposit to Virtual Wallet</b>\n\n"
                     f"<b>Current Balances:</b>\n"
-                    f"├ USDT (BSC): <code>{wallet['usdt_bsc']:.2f}</code>\n"
-                    f"├ USDT (TRON): <code>{wallet['usdt_tron']:.2f}</code>\n"
-                    f"└ USDC (BSC): <code>{wallet['usdc_bsc']:.2f}</code>\n\n"
-                    f"Select network to deposit:"
+                    f"{format_balances()}\n\n"
+                    f"Select token to deposit:"
                 )
                 
                 keyboard = [
                     [InlineKeyboardButton("USDT (BSC)", callback_data=f"wallet_depnet_{user_id}_usdt_bsc")],
                     [InlineKeyboardButton("USDT (TRON)", callback_data=f"wallet_depnet_{user_id}_usdt_tron")],
                     [InlineKeyboardButton("USDC (BSC)", callback_data=f"wallet_depnet_{user_id}_usdc_bsc")],
+                    [InlineKeyboardButton("BNB (BSC)", callback_data=f"wallet_depnet_{user_id}_bnb_bsc")],
+                    [InlineKeyboardButton("TRX (TRON)", callback_data=f"wallet_depnet_{user_id}_trx_tron")],
                     [InlineKeyboardButton("⬅️ Back", callback_data=f"wallet_refresh_{user_id}")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2013,15 +2049,22 @@ Once you've sent the amount, tap the button below."""
                 await query.answer()
             
             elif action == 'depnet':
-                # Show deposit info for specific network
-                network = f"{parts[3]}_{parts[4]}"  # e.g., usdt_bsc
-                network_name = WALLET_NETWORKS.get(network, network.upper())
+                # Show deposit info for specific token with deposit address
+                token = f"{parts[3]}_{parts[4]}"  # e.g., usdt_bsc
+                token_name = WALLET_TOKENS.get(token, token.upper())
+                network = TOKEN_NETWORK_MAP.get(token, 'bsc')
+                deposit_address = WALLET_DEPOSIT_ADDRESSES.get(network, 'Not configured')
+                
+                # Format balance based on token (BNB uses 4 decimals)
+                balance_fmt = f"{wallet[token]:.4f}" if token == 'bnb_bsc' else f"{wallet[token]:.2f}"
                 
                 deposit_text = (
-                    f"💵 <b>Deposit {network_name}</b>\n\n"
-                    f"<b>Current Balance:</b> <code>{wallet[network]:.2f}</code>\n\n"
-                    f"To deposit, contact admin.\n"
-                    f"Deposits will be credited to your virtual wallet."
+                    f"💵 <b>Deposit {token_name}</b>\n\n"
+                    f"<b>Current Balance:</b> <code>{balance_fmt}</code>\n\n"
+                    f"<b>Deposit Address ({network.upper()}):</b>\n"
+                    f"<code>{deposit_address}</code>\n\n"
+                    f"⚠️ Send only <b>{token_name}</b> to this address.\n"
+                    f"After depositing, contact admin with your tx hash."
                 )
                 
                 keyboard = [
@@ -2037,20 +2080,20 @@ Once you've sent the amount, tap the button below."""
                 await query.answer()
                 
             elif action == 'withdraw':
-                # Show withdraw network selection
+                # Show withdraw token selection
                 withdraw_text = (
                     f"💸 <b>Withdraw from Virtual Wallet</b>\n\n"
                     f"<b>Current Balances:</b>\n"
-                    f"├ USDT (BSC): <code>{wallet['usdt_bsc']:.2f}</code>\n"
-                    f"├ USDT (TRON): <code>{wallet['usdt_tron']:.2f}</code>\n"
-                    f"└ USDC (BSC): <code>{wallet['usdc_bsc']:.2f}</code>\n\n"
-                    f"Select network to withdraw:"
+                    f"{format_balances()}\n\n"
+                    f"Select token to withdraw:"
                 )
                 
                 keyboard = [
                     [InlineKeyboardButton("USDT (BSC)", callback_data=f"wallet_wdnet_{user_id}_usdt_bsc")],
                     [InlineKeyboardButton("USDT (TRON)", callback_data=f"wallet_wdnet_{user_id}_usdt_tron")],
                     [InlineKeyboardButton("USDC (BSC)", callback_data=f"wallet_wdnet_{user_id}_usdc_bsc")],
+                    [InlineKeyboardButton("BNB (BSC)", callback_data=f"wallet_wdnet_{user_id}_bnb_bsc")],
+                    [InlineKeyboardButton("TRX (TRON)", callback_data=f"wallet_wdnet_{user_id}_trx_tron")],
                     [InlineKeyboardButton("⬅️ Back", callback_data=f"wallet_refresh_{user_id}")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2063,15 +2106,25 @@ Once you've sent the amount, tap the button below."""
                 await query.answer()
             
             elif action == 'wdnet':
-                # Show withdraw info for specific network
-                network = f"{parts[3]}_{parts[4]}"  # e.g., usdt_bsc
-                network_name = WALLET_NETWORKS.get(network, network.upper())
+                # Show withdraw info for specific token
+                token = f"{parts[3]}_{parts[4]}"  # e.g., usdt_bsc
+                token_name = WALLET_TOKENS.get(token, token.upper())
+                network = TOKEN_NETWORK_MAP.get(token, 'bsc')
+                
+                # Format balance based on token (BNB uses 4 decimals)
+                balance_fmt = f"{wallet[token]:.4f}" if token == 'bnb_bsc' else f"{wallet[token]:.2f}"
+                
+                # Get token symbol for minimum withdrawal
+                token_symbol = token_name.split()[0]  # e.g., "USDT" from "USDT (BSC)"
                 
                 withdraw_text = (
-                    f"💸 <b>Withdraw {network_name}</b>\n\n"
-                    f"<b>Current Balance:</b> <code>{wallet[network]:.2f}</code>\n\n"
-                    f"To withdraw, contact admin.\n"
-                    f"Minimum withdrawal: 10 {network_name.split()[0]}"
+                    f"💸 <b>Withdraw {token_name}</b>\n\n"
+                    f"<b>Current Balance:</b> <code>{balance_fmt}</code>\n"
+                    f"<b>Network:</b> {network.upper()}\n\n"
+                    f"To withdraw, contact admin with:\n"
+                    f"• Amount to withdraw\n"
+                    f"• Your {network.upper()} wallet address\n\n"
+                    f"Minimum withdrawal: 10 {token_symbol}"
                 )
                 
                 keyboard = [
@@ -2097,9 +2150,7 @@ Once you've sent the amount, tap the button below."""
                 tx_text = (
                     f"📜 <b>Transaction History</b>\n\n"
                     f"<b>Current Balances:</b>\n"
-                    f"├ USDT (BSC): <code>{wallet['usdt_bsc']:.2f}</code>\n"
-                    f"├ USDT (TRON): <code>{wallet['usdt_tron']:.2f}</code>\n"
-                    f"└ USDC (BSC): <code>{wallet['usdc_bsc']:.2f}</code>\n\n"
+                    f"{format_balances()}\n\n"
                     f"{tx_list}"
                 )
                 
