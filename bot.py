@@ -1740,6 +1740,7 @@ Once you've sent the amount, tap the button below."""
             
             # Update message text
             updated_text = (
+                "<b>📋 Step 1 - Select Roles</b>\n\n"
                 "<b>⚠️ Choose roles accordingly</b>\n\n"
                 "<b>As release & refund happen according to roles</b>\n\n"
                 "<b>Refund goes to seller & release to buyer</b>\n\n"
@@ -2267,14 +2268,21 @@ async def send_step2_blockchain_message(bot, send_chat_id: int, chat_id: int) ->
 
 
 async def send_step3_coin_message(bot, send_chat_id: int, chat_id: int) -> None:
-    """Send Step 3 - Select Coin message with USDT/USDC buttons"""
+    """Send Step 3 - Select Coin message with USDT/USDC buttons (TRON only shows USDT)"""
     try:
         step3_text = "<b>Step 3 - Select Coin</b>"
         
-        keyboard = [[
-            InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}"),
-            InlineKeyboardButton("USDC", callback_data=f"coin_usdc_{chat_id}")
-        ]]
+        # Check if TRON is selected - only show USDT for TRON
+        selected_blockchain = user_blockchain.get(chat_id, 'BSC')
+        if selected_blockchain == 'TRON':
+            # TRON only supports USDT
+            keyboard = [[InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}")]]
+        else:
+            # BSC supports both USDT and USDC
+            keyboard = [[
+                InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}"),
+                InlineKeyboardButton("USDC", callback_data=f"coin_usdc_{chat_id}")
+            ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         image_path = "step5_coin_image.jpg"
@@ -2359,29 +2367,65 @@ async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> Non
             network_fee = 0.2
         
         # Calculate service fee based on user bios containing "@room"
-        # Try to get user bios - if we can't, default to 0.75%
+        # Try to get user bios using user_id first, then username - if we can't, default to 0.75%
         buyer_has_room = False
         seller_has_room = False
         
-        try:
-            # Try to get buyer's bio
-            if buyer_username:
-                buyer_chat = await bot.get_chat(f"@{buyer_username}")
-                if buyer_chat and buyer_chat.bio and "@room" in buyer_chat.bio.lower():
-                    buyer_has_room = True
-                    logger.info(f"✅ Buyer @{buyer_username} has @room in bio")
-        except Exception as e:
-            logger.info(f"Could not get buyer bio: {e}")
+        # Try to get buyer's user_id from stored data
+        buyer_user_id = get_user_id(buyer_username) if buyer_username else None
+        seller_user_id = get_user_id(seller_username) if seller_username else None
         
         try:
-            # Try to get seller's bio
-            if seller_username:
-                seller_chat = await bot.get_chat(f"@{seller_username}")
-                if seller_chat and seller_chat.bio and "@room" in seller_chat.bio.lower():
-                    seller_has_room = True
-                    logger.info(f"✅ Seller @{seller_username} has @room in bio")
+            # Try to get buyer's bio using user_id first (more reliable)
+            if buyer_user_id:
+                logger.info(f"🔍 Checking buyer bio using user_id: {buyer_user_id}")
+                buyer_chat = await bot.get_chat(buyer_user_id)
+                if buyer_chat:
+                    logger.info(f"📋 Buyer chat object: bio={buyer_chat.bio}")
+                    if buyer_chat.bio and "@room" in buyer_chat.bio.lower():
+                        buyer_has_room = True
+                        logger.info(f"✅ Buyer @{buyer_username} has @room in bio")
+                    else:
+                        logger.info(f"ℹ️ Buyer @{buyer_username} does NOT have @room in bio")
+            elif buyer_username:
+                logger.info(f"🔍 Checking buyer bio using username: @{buyer_username}")
+                buyer_chat = await bot.get_chat(f"@{buyer_username}")
+                if buyer_chat:
+                    logger.info(f"📋 Buyer chat object: bio={buyer_chat.bio}")
+                    if buyer_chat.bio and "@room" in buyer_chat.bio.lower():
+                        buyer_has_room = True
+                        logger.info(f"✅ Buyer @{buyer_username} has @room in bio")
+                    else:
+                        logger.info(f"ℹ️ Buyer @{buyer_username} does NOT have @room in bio")
         except Exception as e:
-            logger.info(f"Could not get seller bio: {e}")
+            logger.warning(f"❌ Could not get buyer bio: {e}")
+        
+        try:
+            # Try to get seller's bio using user_id first (more reliable)
+            if seller_user_id:
+                logger.info(f"🔍 Checking seller bio using user_id: {seller_user_id}")
+                seller_chat = await bot.get_chat(seller_user_id)
+                if seller_chat:
+                    logger.info(f"📋 Seller chat object: bio={seller_chat.bio}")
+                    if seller_chat.bio and "@room" in seller_chat.bio.lower():
+                        seller_has_room = True
+                        logger.info(f"✅ Seller @{seller_username} has @room in bio")
+                    else:
+                        logger.info(f"ℹ️ Seller @{seller_username} does NOT have @room in bio")
+            elif seller_username:
+                logger.info(f"🔍 Checking seller bio using username: @{seller_username}")
+                seller_chat = await bot.get_chat(f"@{seller_username}")
+                if seller_chat:
+                    logger.info(f"📋 Seller chat object: bio={seller_chat.bio}")
+                    if seller_chat.bio and "@room" in seller_chat.bio.lower():
+                        seller_has_room = True
+                        logger.info(f"✅ Seller @{seller_username} has @room in bio")
+                    else:
+                        logger.info(f"ℹ️ Seller @{seller_username} does NOT have @room in bio")
+        except Exception as e:
+            logger.warning(f"❌ Could not get seller bio: {e}")
+        
+        logger.info(f"📊 Bio check results: buyer_has_room={buyer_has_room}, seller_has_room={seller_has_room}")
         
         # Determine service fee percentage
         # Both have @room: 0.25%, One has @room: 0.5%, Neither has @room: 0.75%
