@@ -2086,50 +2086,12 @@ Release has been declined by the seller."""
             # Save approval to database
             database.approve_summary(chat_id, user_role)
             
-            # Get transaction data for updated message
-            amount = None
-            rate = None
-            payment_method = None
-            coin = None
-            buyer_address = buyer_addresses.get(chat_id, "N/A")
-            seller_address = seller_addresses.get(chat_id, "N/A")
-            
-            # Get data from tracking dictionaries
-            for uid, amt in user_amounts.items():
-                if amount is None:
-                    amount = amt
-                    break
-            
-            for uid, r in user_rates.items():
-                rate = r
-                break
-            
-            for uid, pm in user_payment_methods.items():
-                payment_method = pm
-                break
-            
-            # Get coin for this room
-            coin = user_coins.get(chat_id)
-            
-            rate_formatted = f"₹{rate:.2f}" if rate else "N/A"
-            
-            # Build approval status strings
-            buyer_status = f"✅ @{buyer_username} has approved." if approvals[chat_id]['buyer'] else f"⏳ Waiting for @{buyer_username} to approve."
-            seller_status = f"✅ @{seller_username} has approved." if approvals[chat_id]['seller'] else f"⏳ Waiting for @{seller_username} to approve."
-            
-            deal_text = f"""📋 <b>Deal Summary</b>
-
-• <b>Amount:</b> {amount} {coin if coin else 'N/A'}
-• <b>Rate:</b> {rate_formatted}
-• <b>Payment:</b> {payment_method}
-• Chain: BSC
-• <b>Buyer Address:</b> <code>{buyer_address}</code>
-• <b>Seller Address:</b> <code>{seller_address}</code>
-
-🛑 <b>Do not send funds here</b> 🛑
-
-{buyer_status}
-{seller_status}"""
+            # Use the shared helper function to build deal text with current approval status
+            deal_text = build_deal_summary_text(
+                chat_id, 
+                buyer_approved=approvals[chat_id]['buyer'], 
+                seller_approved=approvals[chat_id]['seller']
+            )
             
             # Check if both approved
             both_approved = approvals[chat_id]['buyer'] and approvals[chat_id]['seller']
@@ -2701,30 +2663,20 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str, token: s
         
         logger.info(f"🔍 Verifying BSC transaction: {tx_hash} to escrow: {escrow_address} for token: {token}")
         
-        api_url = "https://api.bscscan.com/api"
-        bscscan_api_key = os.getenv('BSCSCAN_API_KEY', '')
-        
-        if not bscscan_api_key:
-            logger.warning("❌ BSCSCAN_API_KEY not configured")
-            return {
-                'valid': False,
-                'amount': None,
-                'from_address': None,
-                'to_address': None,
-                'block_number': None,
-                'error': '❌ BSCScan API key not configured'
-            }
+        # Use BSC JSON-RPC endpoint directly (more reliable than BSCscan proxy API)
+        bsc_rpc_url = "https://bsc-dataseed.binance.org/"
         
         # For native BNB transfers, check transaction directly
         if token == 'BNB':
-            params = {
-                'module': 'proxy',
-                'action': 'eth_getTransactionByHash',
-                'txhash': tx_hash,
-                'apikey': bscscan_api_key
+            # Get transaction by hash using JSON-RPC
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "eth_getTransactionByHash",
+                "params": [tx_hash],
+                "id": 1
             }
             
-            response = requests.get(api_url, params=params, timeout=15)
+            response = requests.post(bsc_rpc_url, json=payload, timeout=15)
             data = response.json()
             
             if not data.get('result') or not isinstance(data.get('result'), dict):
@@ -2771,16 +2723,16 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str, token: s
                 'error': None
             }
         
-        # For BEP20 tokens (USDT/USDC), get transaction receipt and parse logs
-        params = {
-            'module': 'proxy',
-            'action': 'eth_getTransactionReceipt',
-            'txhash': tx_hash,
-            'apikey': bscscan_api_key
+        # For BEP20 tokens (USDT/USDC), get transaction receipt and parse logs using JSON-RPC
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "eth_getTransactionReceipt",
+            "params": [tx_hash],
+            "id": 1
         }
         
-        response = requests.get(api_url, params=params, timeout=15)
-        logger.info(f"📊 BSCscan Receipt Response Status: {response.status_code}")
+        response = requests.post(bsc_rpc_url, json=payload, timeout=15)
+        logger.info(f"📊 BSC RPC Receipt Response Status: {response.status_code}")
         
         if not response.text:
             logger.error(f"❌ BSCscan API returned empty response for hash: {tx_hash}")
@@ -3451,121 +3403,101 @@ async def send_step3_coin_message(bot, send_chat_id: int, chat_id: int) -> None:
             logger.warning(f"❌ Failed to send Step 3 message: {e}")
 
 
-async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> None:
-    """Send Deal Summary message with approval button"""
-    try:
-        # Get all transaction data
-        amount = None
-        rate = None
-        payment_method = None
-        coin = None
-        buyer_address = buyer_addresses.get(chat_id, "N/A")
-        seller_address = seller_addresses.get(chat_id, "N/A")
-        buyer_username = room_initiators[chat_id].get('buyer') if chat_id in room_initiators else "Unknown"
-        seller_username = room_initiators[chat_id].get('seller') if chat_id in room_initiators else "Unknown"
-        
-        # Find user IDs for buyer and seller from user_roles to get their amounts, rates, etc.
-        if chat_id in user_roles:
-            for username, role in user_roles[chat_id].items():
-                # Find the user_id by matching username
-                for uid, stored_amt in user_amounts.items():
-                    # This is a bit tricky - we need to find the actual user_id
-                    # Let's use the first available amount/rate for the room
-                    if amount is None:
-                        amount = stored_amt
-                        break
-                if amount is not None:
+def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_approved: bool = False) -> str:
+    """Build deal summary text with current formatting - single source of truth"""
+    # Get all transaction data
+    amount = None
+    rate = None
+    payment_method = None
+    coin = None
+    buyer_address = buyer_addresses.get(chat_id, "N/A")
+    seller_address = seller_addresses.get(chat_id, "N/A")
+    buyer_username = room_initiators[chat_id].get('buyer') if chat_id in room_initiators else "Unknown"
+    seller_username = room_initiators[chat_id].get('seller') if chat_id in room_initiators else "Unknown"
+    
+    # Find user IDs for buyer and seller from user_roles to get their amounts, rates, etc.
+    if chat_id in user_roles:
+        for username, role in user_roles[chat_id].items():
+            for uid, stored_amt in user_amounts.items():
+                if amount is None:
+                    amount = stored_amt
                     break
-        
-        # Get rate from user_rates (just take the first one for the room)
-        for uid, r in user_rates.items():
-            rate = r
-            break
-        
-        # Get payment method (just take the first one for the room)
-        for uid, pm in user_payment_methods.items():
-            payment_method = pm
-            break
-        
-        # Get coin for this room
-        coin = user_coins.get(chat_id, 'USDT')
-        
-        # Get blockchain for this room
-        chain = user_blockchain.get(chat_id, 'BSC')
-        
-        # Calculate network fee based on chain
-        # BSC: 0.2, TRON: 3
-        if chain == 'TRON':
-            network_fee = 3.0
-        else:  # BSC
-            network_fee = 0.2
-        
-        # Calculate service fee based on user bios containing "@room"
-        # Read bio flags from database (populated by userbot when creating deal rooms)
-        buyer_has_room = False
-        seller_has_room = False
-        
-        # Try to get buyer's user_id from stored data
-        buyer_user_id = get_user_id(buyer_username) if buyer_username else None
-        seller_user_id = get_user_id(seller_username) if seller_username else None
-        
-        # Check buyer's bio flag from database
-        if buyer_user_id:
-            buyer_bio_flag = database.get_user_bio_flag(buyer_user_id)
-            if buyer_bio_flag is not None:
-                buyer_has_room = buyer_bio_flag
-                logger.info(f"📋 Buyer @{buyer_username} (ID: {buyer_user_id}) bio flag from DB: has_room={buyer_has_room}")
-            else:
-                logger.info(f"ℹ️ No bio flag in DB for buyer @{buyer_username} (ID: {buyer_user_id})")
-        elif buyer_username:
-            buyer_bio_flag = database.get_user_bio_flag_by_username(buyer_username)
-            if buyer_bio_flag is not None:
-                buyer_has_room = buyer_bio_flag
-                logger.info(f"📋 Buyer @{buyer_username} bio flag from DB (by username): has_room={buyer_has_room}")
-            else:
-                logger.info(f"ℹ️ No bio flag in DB for buyer @{buyer_username}")
-        
-        # Check seller's bio flag from database
-        if seller_user_id:
-            seller_bio_flag = database.get_user_bio_flag(seller_user_id)
-            if seller_bio_flag is not None:
-                seller_has_room = seller_bio_flag
-                logger.info(f"📋 Seller @{seller_username} (ID: {seller_user_id}) bio flag from DB: has_room={seller_has_room}")
-            else:
-                logger.info(f"ℹ️ No bio flag in DB for seller @{seller_username} (ID: {seller_user_id})")
-        elif seller_username:
-            seller_bio_flag = database.get_user_bio_flag_by_username(seller_username)
-            if seller_bio_flag is not None:
-                seller_has_room = seller_bio_flag
-                logger.info(f"📋 Seller @{seller_username} bio flag from DB (by username): has_room={seller_has_room}")
-            else:
-                logger.info(f"ℹ️ No bio flag in DB for seller @{seller_username}")
-        
-        logger.info(f"📊 Bio check results: buyer_has_room={buyer_has_room}, seller_has_room={seller_has_room}")
-        
-        # Determine service fee percentage
-        # Both have @room: 0.25%, One has @room: 0.5%, Neither has @room: 0.75%
-        if buyer_has_room and seller_has_room:
-            service_fee_percent = 0.25
-        elif buyer_has_room or seller_has_room:
-            service_fee_percent = 0.5
-        else:
-            service_fee_percent = 0.75
-        
-        # Calculate service fee amount
-        amount_float = float(amount) if amount else 0
-        service_fee_amount = amount_float * (service_fee_percent / 100)
-        
-        # Calculate release amount (amount - network fee - service fee)
-        release_amount = amount_float - network_fee - service_fee_amount
-        
-        # Format values
-        rate_formatted = f"₹{rate:.1f}" if rate else "N/A"
-        network_fee_formatted = f"{network_fee} {coin}"
-        service_fee_formatted = f"{service_fee_percent}%"
-        release_amount_formatted = f"{release_amount:.2f} {coin}"
-        
-        deal_text = f"""📋  <b>Deal Summary</b>
+            if amount is not None:
+                break
+    
+    # Get rate from user_rates (just take the first one for the room)
+    for uid, r in user_rates.items():
+        rate = r
+        break
+    
+    # Get payment method (just take the first one for the room)
+    for uid, pm in user_payment_methods.items():
+        payment_method = pm
+        break
+    
+    # Get coin for this room
+    coin = user_coins.get(chat_id, 'USDT')
+    
+    # Get blockchain for this room
+    chain = user_blockchain.get(chat_id, 'BSC')
+    
+    # Calculate network fee based on chain
+    if chain == 'TRON':
+        network_fee = 3.0
+    else:  # BSC
+        network_fee = 0.2
+    
+    # Calculate service fee based on user bios containing "@room"
+    buyer_has_room = False
+    seller_has_room = False
+    
+    buyer_user_id = get_user_id(buyer_username) if buyer_username else None
+    seller_user_id = get_user_id(seller_username) if seller_username else None
+    
+    if buyer_user_id:
+        buyer_bio_flag = database.get_user_bio_flag(buyer_user_id)
+        if buyer_bio_flag is not None:
+            buyer_has_room = buyer_bio_flag
+    elif buyer_username:
+        buyer_bio_flag = database.get_user_bio_flag_by_username(buyer_username)
+        if buyer_bio_flag is not None:
+            buyer_has_room = buyer_bio_flag
+    
+    if seller_user_id:
+        seller_bio_flag = database.get_user_bio_flag(seller_user_id)
+        if seller_bio_flag is not None:
+            seller_has_room = seller_bio_flag
+    elif seller_username:
+        seller_bio_flag = database.get_user_bio_flag_by_username(seller_username)
+        if seller_bio_flag is not None:
+            seller_has_room = seller_bio_flag
+    
+    # Determine service fee percentage
+    if buyer_has_room and seller_has_room:
+        service_fee_percent = 0.25
+    elif buyer_has_room or seller_has_room:
+        service_fee_percent = 0.5
+    else:
+        service_fee_percent = 0.75
+    
+    # Calculate service fee amount
+    amount_float = float(amount) if amount else 0
+    service_fee_amount = amount_float * (service_fee_percent / 100)
+    
+    # Calculate release amount (amount - network fee - service fee)
+    release_amount = amount_float - network_fee - service_fee_amount
+    
+    # Format values
+    rate_formatted = f"₹{rate:.1f}" if rate else "N/A"
+    network_fee_formatted = f"{network_fee} {coin}"
+    service_fee_formatted = f"{service_fee_percent}%"
+    release_amount_formatted = f"{release_amount:.2f} {coin}"
+    
+    # Build approval status strings
+    buyer_status = f"✅ @{buyer_username} has approved." if buyer_approved else f"⏳ Waiting for @{buyer_username} to approve."
+    seller_status = f"✅ @{seller_username} has approved." if seller_approved else f"⏳ Waiting for @{seller_username} to approve."
+    
+    deal_text = f"""📋  <b>Deal Summary</b>
 
 • <b>Amount:</b> {amount} {coin}
 • <b>Rate:</b> {rate_formatted}
@@ -3579,8 +3511,20 @@ async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> Non
 
 🛑 <b>Do not send funds here</b> 🛑
 
-⏳ Waiting for @{buyer_username} to approve.
-⏳ Waiting for @{seller_username} to approve."""
+{buyer_status}
+{seller_status}"""
+    
+    return deal_text
+
+
+async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> None:
+    """Send Deal Summary message with approval button"""
+    try:
+        buyer_username = room_initiators[chat_id].get('buyer') if chat_id in room_initiators else "Unknown"
+        seller_username = room_initiators[chat_id].get('seller') if chat_id in room_initiators else "Unknown"
+        
+        # Use the shared helper function to build deal text
+        deal_text = build_deal_summary_text(chat_id, buyer_approved=False, seller_approved=False)
         
         keyboard = [[InlineKeyboardButton("Approve", callback_data=f"approve_deal_{chat_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
