@@ -135,6 +135,7 @@ rooms_waiting_for_requests = set()  # Track rooms waiting for join requests
 room_joined_users = {}  # Track which users have joined each room
 disclaimer_sent = set()  # Track which rooms already sent the disclaimer (prevent duplicates)
 deal_notifications_sent = set()  # Track which deal requests already sent notifications (prevent duplicates)
+room_fee_tiers = {}  # Track fee tier per room: {chat_id: '0.5%'} - set when deal room is created
 user_roles = {}  # Track roles: {chat_id: {username.lower(): 'BUYER'/'SELLER'}}
 role_messages = {}  # Track role message IDs: {chat_id: message_id}
 role_selection_sent = set()  # Track which rooms already sent role selection (prevent duplicates)
@@ -535,6 +536,11 @@ async def check_and_send_deal_results(application, initiator_username):
                             
                             # Get fee tier from result (calculated by userbot based on user bios)
                             fee_tier = result.get('fee_tier', '0.75%')
+                            
+                            # Store fee tier for this room (to be used in deal summary)
+                            if chat_id:
+                                room_fee_tiers[chat_id] = fee_tier
+                                logger.info(f"💰 Stored fee tier {fee_tier} for room {chat_id}")
                             
                             # Send message with photo to the GROUP where deal was initiated
                             msg_text = (
@@ -3447,38 +3453,17 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
     else:  # BSC
         network_fee = 0.2
     
-    # Calculate service fee based on user bios containing "@room"
-    buyer_has_room = False
-    seller_has_room = False
+    # Get service fee from stored fee tier (set when deal room was created)
+    # This ensures the service fee matches the fee tier shown in /deal command
+    stored_fee_tier = room_fee_tiers.get(chat_id, '0.75%')
     
-    buyer_user_id = get_user_id(buyer_username) if buyer_username else None
-    seller_user_id = get_user_id(seller_username) if seller_username else None
-    
-    if buyer_user_id:
-        buyer_bio_flag = database.get_user_bio_flag(buyer_user_id)
-        if buyer_bio_flag is not None:
-            buyer_has_room = buyer_bio_flag
-    elif buyer_username:
-        buyer_bio_flag = database.get_user_bio_flag_by_username(buyer_username)
-        if buyer_bio_flag is not None:
-            buyer_has_room = buyer_bio_flag
-    
-    if seller_user_id:
-        seller_bio_flag = database.get_user_bio_flag(seller_user_id)
-        if seller_bio_flag is not None:
-            seller_has_room = seller_bio_flag
-    elif seller_username:
-        seller_bio_flag = database.get_user_bio_flag_by_username(seller_username)
-        if seller_bio_flag is not None:
-            seller_has_room = seller_bio_flag
-    
-    # Determine service fee percentage
-    if buyer_has_room and seller_has_room:
-        service_fee_percent = 0.25
-    elif buyer_has_room or seller_has_room:
-        service_fee_percent = 0.5
-    else:
+    # Parse the fee tier string to get the percentage value
+    try:
+        service_fee_percent = float(stored_fee_tier.replace('%', ''))
+    except (ValueError, AttributeError):
         service_fee_percent = 0.75
+    
+    logger.info(f"📊 Using stored fee tier {stored_fee_tier} for room {chat_id}")
     
     # Calculate service fee amount
     amount_float = float(amount) if amount else 0
