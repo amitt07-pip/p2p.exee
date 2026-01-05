@@ -799,6 +799,68 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             pass
 
 
+# Virtual wallet data storage (in-memory, will be replaced with DB later)
+virtual_wallets = {}  # {user_id: {'balance': float, 'transactions': []}}
+
+# Authorized user IDs for virtual wallet
+WALLET_AUTHORIZED_USERS = [6864194951, 7338429782]
+
+
+async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /wallet command - virtual wallet for authorized users only"""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    # Only allow in private chat (DM)
+    if chat.type != 'private':
+        await update.message.reply_text("❌ This command only works in private chat (DM)")
+        return
+    
+    # Check if user is authorized
+    if user.id not in WALLET_AUTHORIZED_USERS:
+        await update.message.reply_text("❌ You are not authorized to use this feature")
+        return
+    
+    logger.info(f"💰 /wallet command from authorized user {user.id} (@{user.username})")
+    
+    # Initialize wallet if not exists
+    if user.id not in virtual_wallets:
+        virtual_wallets[user.id] = {
+            'balance': 0.0,
+            'transactions': []
+        }
+    
+    wallet = virtual_wallets[user.id]
+    balance = wallet['balance']
+    
+    # Create wallet message with buttons
+    wallet_text = (
+        f"💰 <b>Virtual Wallet</b>\n\n"
+        f"<b>User:</b> @{user.username}\n"
+        f"<b>User ID:</b> <code>{user.id}</code>\n\n"
+        f"<b>Balance:</b> <code>{balance:.2f} USDT</code>\n\n"
+        f"Select an option below:"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("💵 Deposit", callback_data=f"wallet_deposit_{user.id}"),
+            InlineKeyboardButton("💸 Withdraw", callback_data=f"wallet_withdraw_{user.id}")
+        ],
+        [
+            InlineKeyboardButton("📜 Transactions", callback_data=f"wallet_transactions_{user.id}"),
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"wallet_refresh_{user.id}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        wallet_text,
+        parse_mode='HTML',
+        reply_markup=reply_markup
+    )
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle button presses"""
     query = update.callback_query
@@ -1861,6 +1923,126 @@ Once you've sent the amount, tap the button below."""
             await query.answer("❌ Error", show_alert=True)
             return CHOOSING
     
+    # Handle wallet callbacks
+    elif query.data.startswith('wallet_'):
+        try:
+            parts = query.data.split('_')
+            action = parts[1]  # deposit, withdraw, transactions, refresh
+            wallet_user_id = int(parts[2])
+            
+            # Verify user is authorized and is the wallet owner
+            if user_id not in WALLET_AUTHORIZED_USERS or user_id != wallet_user_id:
+                await query.answer("❌ Not authorized", show_alert=True)
+                return CHOOSING
+            
+            # Initialize wallet if not exists
+            if user_id not in virtual_wallets:
+                virtual_wallets[user_id] = {
+                    'balance': 0.0,
+                    'transactions': []
+                }
+            
+            wallet = virtual_wallets[user_id]
+            balance = wallet['balance']
+            
+            if action == 'refresh':
+                # Refresh wallet display
+                wallet_text = (
+                    f"💰 <b>Virtual Wallet</b>\n\n"
+                    f"<b>User:</b> @{username}\n"
+                    f"<b>User ID:</b> <code>{user_id}</code>\n\n"
+                    f"<b>Balance:</b> <code>{balance:.2f} USDT</code>\n\n"
+                    f"Select an option below:"
+                )
+                
+                keyboard = [
+                    [
+                        InlineKeyboardButton("💵 Deposit", callback_data=f"wallet_deposit_{user_id}"),
+                        InlineKeyboardButton("💸 Withdraw", callback_data=f"wallet_withdraw_{user_id}")
+                    ],
+                    [
+                        InlineKeyboardButton("📜 Transactions", callback_data=f"wallet_transactions_{user_id}"),
+                        InlineKeyboardButton("🔄 Refresh", callback_data=f"wallet_refresh_{user_id}")
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    wallet_text,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                await query.answer("✅ Refreshed")
+                
+            elif action == 'deposit':
+                # Show deposit info
+                deposit_text = (
+                    f"💵 <b>Deposit to Virtual Wallet</b>\n\n"
+                    f"<b>Current Balance:</b> <code>{balance:.2f} USDT</code>\n\n"
+                    f"To deposit, contact admin.\n"
+                    f"Deposits will be credited to your virtual wallet."
+                )
+                
+                keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"wallet_refresh_{user_id}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    deposit_text,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                await query.answer()
+                
+            elif action == 'withdraw':
+                # Show withdraw info
+                withdraw_text = (
+                    f"💸 <b>Withdraw from Virtual Wallet</b>\n\n"
+                    f"<b>Current Balance:</b> <code>{balance:.2f} USDT</code>\n\n"
+                    f"To withdraw, contact admin.\n"
+                    f"Minimum withdrawal: 10 USDT"
+                )
+                
+                keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"wallet_refresh_{user_id}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    withdraw_text,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                await query.answer()
+                
+            elif action == 'transactions':
+                # Show transaction history
+                transactions = wallet.get('transactions', [])
+                if transactions:
+                    tx_list = "\n".join([f"• {tx}" for tx in transactions[-10:]])  # Last 10
+                else:
+                    tx_list = "No transactions yet"
+                
+                tx_text = (
+                    f"📜 <b>Transaction History</b>\n\n"
+                    f"<b>Current Balance:</b> <code>{balance:.2f} USDT</code>\n\n"
+                    f"{tx_list}"
+                )
+                
+                keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"wallet_refresh_{user_id}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(
+                    tx_text,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                await query.answer()
+            
+            return CHOOSING
+            
+        except Exception as e:
+            logger.warning(f"❌ Error handling wallet callback: {e}")
+            await query.answer("❌ Error", show_alert=True)
+            return CHOOSING
+    
     return CHOOSING
 
 
@@ -2800,6 +2982,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         
         # Check if room is waiting for transaction hash
         elif room_transaction_state.get(original_chat_id) == 'awaiting_hash':
+            # Check if this user is the seller (only seller can provide tx hash)
+            if original_chat_id in room_initiators:
+                seller_username = room_initiators[original_chat_id].get('seller')
+                if seller_username and user.username and user.username.lower() != seller_username.lower():
+                    # Silently ignore buyer's messages during this step
+                    logger.info(f"⏭️ Ignoring message from {user.username} (not seller) in room {original_chat_id}")
+                    return
+            
             try:
                 # Get chat ID for sending messages
                 send_chat_id = -1000000000000 - original_chat_id
@@ -3710,6 +3900,7 @@ def main() -> None:
     application.add_handler(CommandHandler("kick", kick_command))
     application.add_handler(CommandHandler("link", link_command))
     application.add_handler(CommandHandler("restart", restart_command))
+    application.add_handler(CommandHandler("wallet", wallet_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
