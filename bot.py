@@ -120,6 +120,7 @@ role_messages = {}  # Track role message IDs: {chat_id: message_id}
 role_selection_sent = set()  # Track which rooms already sent role selection (prevent duplicates)
 room_transaction_state = {}  # Track transaction state: {chat_id: 'step1'/'step2'/'complete'}
 step1_messages_sent = set()  # Track which rooms sent step1 (prevent duplicates)
+step4_amount_messages_sent = set()  # Track which rooms sent step4 amount (prevent duplicates)
 user_amounts = {}  # Track entered amounts: {user_id: amount}
 user_rates = {}  # Track entered rates: {user_id: rate}
 user_payment_methods = {}  # Track payment methods: {user_id: method}
@@ -127,6 +128,8 @@ user_blockchain = {}  # Track blockchain: {chat_id: blockchain}
 user_coins = {}  # Track selected coins: {chat_id: coin}
 buyer_addresses = {}  # Track buyer wallet addresses: {chat_id: address}
 seller_addresses = {}  # Track seller wallet addresses: {chat_id: address}
+step2_blockchain_messages = {}  # Track Step 2 blockchain message IDs: {chat_id: message_id}
+step3_coin_messages = {}  # Track Step 3 coin message IDs: {chat_id: message_id}
 step4_messages = {}  # Track Step 4 message IDs: {chat_id: message_id}
 step5_messages = {}  # Track Step 5 message IDs: {chat_id: message_id}
 buyer_wallet_messages = {}  # Track buyer wallet message IDs: {chat_id: message_id}
@@ -1274,7 +1277,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Update the button to show checkmark
             try:
                 await query.edit_message_caption(
-                    caption="🔗 Step 4 – Choose Blockchain",
+                    caption="<b>🔗 Step 2 - Choose Blockchain</b>",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✔️ BSC", callback_data=f"blockchain_bsc_{chat_id}_done")]]),
                     parse_mode='HTML'
                 )
@@ -1282,13 +1285,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception as e:
                 logger.warning(f"⚠️ Could not edit blockchain message for room {chat_id}: {e}")
             
-            # Send Step 5 message only if not already sent
-            if chat_id not in step5_messages:
-                logger.info(f"📨 Sending Step 5 (coin selection) message to room {chat_id}")
-                await send_step5_coin_message(context.bot, send_chat_id, chat_id)
-                logger.info(f"✅ Step 5 sent for room {chat_id}")
+            # Send Step 3 (coin selection) message only if not already sent
+            if chat_id not in step3_coin_messages:
+                logger.info(f"📨 Sending Step 3 (coin selection) message to room {chat_id}")
+                await send_step3_coin_message(context.bot, send_chat_id, chat_id)
+                logger.info(f"✅ Step 3 sent for room {chat_id}")
             else:
-                logger.info(f"⏩ Step 5 already sent for room {chat_id}, skipping")
+                logger.info(f"⏩ Step 3 already sent for room {chat_id}, skipping")
             
             await query.answer("✅ Blockchain: BSC selected")
             return CHOOSING
@@ -1329,16 +1332,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             try:
                 await query.edit_message_caption(
-                    caption="⚪ Select Coin",
+                    caption="<b>⚪ Step 3 - Select Coin</b>",
                     reply_markup=reply_markup,
                     parse_mode='HTML'
                 )
             except Exception as e:
                 logger.warning(f"Could not edit coin message: {e}")
-            
-            # Set state to waiting for buyer wallet address
-            room_transaction_state[chat_id] = 'step6_buyer_address'
-            logger.info(f"🔄 Room {chat_id} now waiting for buyer wallet address")
             
             # Get buyer and seller usernames from user_roles
             buyer_username = None
@@ -1376,31 +1375,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception as e:
                 logger.warning(f"Could not send notification to channel: {e}")
             
-            # Send buyer wallet address message (individually to buyer)
-            if buyer_username:
-                try:
-                    step5_text = f"💰 <b>Step 5</b> - @{buyer_username}, enter your BSC wallet address\nstarts with 0x and is 42 chars (0x + 40 hex)"
-                    
-                    image_path = os.path.join(SCRIPT_DIR, "step6_buyer_address_image.jpg")
-                    if os.path.exists(image_path):
-                        msg = await context.bot.send_photo(
-                            chat_id=send_chat_id,
-                            photo=open(image_path, 'rb'),
-                            caption=step5_text,
-                            parse_mode='HTML'
-                        )
-                        buyer_wallet_messages[chat_id] = msg.message_id
-                        logger.info(f"✅ Sent buyer wallet message to room {chat_id}")
-                    else:
-                        msg = await context.bot.send_message(
-                            chat_id=send_chat_id,
-                            text=step5_text,
-                            parse_mode='HTML'
-                        )
-                        buyer_wallet_messages[chat_id] = msg.message_id
-                        logger.warning(f"⚠️ Sent buyer wallet (text only) to room {chat_id} - image not found")
-                except Exception as e:
-                    logger.warning(f"Could not send buyer wallet message: {e}")
+            # Send Step 4 (amount entry) message
+            if chat_id not in step4_amount_messages_sent:
+                logger.info(f"📨 Sending Step 4 (amount entry) message to room {chat_id}")
+                await send_step4_amount_message(context.bot, send_chat_id, chat_id)
+                logger.info(f"✅ Step 4 sent for room {chat_id}")
+            else:
+                logger.info(f"⏩ Step 4 already sent for room {chat_id}, skipping")
             
             await query.answer(f"✅ Coin selected: {coin_type}")
             return CHOOSING
@@ -1742,9 +1723,9 @@ Once you've sent the amount, tap the button below."""
             
             await query.answer(f"✅ You selected: {role_type}")
             
-            # Check if both roles are now selected and send Step 1
-            if both_selected and original_chat_id not in step1_messages_sent:
-                logger.info(f"🔄 Both roles selected, preparing Step 1 for room {original_chat_id}")
+            # Check if both roles are now selected and send Step 2 (Blockchain)
+            if both_selected and original_chat_id not in step2_blockchain_messages:
+                logger.info(f"🔄 Both roles selected, preparing Step 2 (Blockchain) for room {original_chat_id}")
                 
                 # Save roles to database
                 buyer_user = None
@@ -1765,7 +1746,7 @@ Once you've sent the amount, tap the button below."""
                     )
                     logger.info(f"📊 Saved roles to database: buyer={buyer_user}, seller={seller_user}")
                 
-                await send_step1_amount_message(context.bot, send_chat_id, original_chat_id)
+                await send_step2_blockchain_message(context.bot, send_chat_id, original_chat_id)
             
             return CHOOSING
             
@@ -2074,117 +2055,128 @@ async def send_deal_complete_message(bot, send_chat_id: int, chat_id: int, buyer
         logger.warning(f"❌ Failed to send deal complete message: {e}")
 
 
-async def send_step1_amount_message(bot, send_chat_id: int, chat_id: int) -> None:
-    """Send Step 1 - Enter USDT amount message"""
+async def send_step4_amount_message(bot, send_chat_id: int, chat_id: int) -> None:
+    """Send Step 4 - Enter USDT amount message"""
     try:
-        if chat_id in step1_messages_sent:
-            logger.info(f"⏭️ Step 1 already sent to room {chat_id}, skipping")
+        if chat_id in step4_amount_messages_sent:
+            logger.info(f"⏭️ Step 4 already sent to room {chat_id}, skipping")
             return
         
         # Mark as sent EARLY to prevent race conditions
-        step1_messages_sent.add(chat_id)
+        step4_amount_messages_sent.add(chat_id)
         
-        step1_text = "💰 Step 1 - Enter USDT amount including fee → Example: 1000"
+        # Get the selected coin (default to USDT)
+        selected_coin = user_coins.get(chat_id, 'USDT')
+        
+        step4_text = (
+            f"<b>💰 Step 4 - Enter {selected_coin} Amount</b>\n\n"
+            "Chain: BSC\n"
+            f"Network Fee: 0.2 {selected_coin}\n\n"
+            "Enter amount including fee → Example: 1000"
+        )
         
         image_path = "step1_quantity_image.jpg"
         if os.path.exists(image_path):
             await bot.send_photo(
                 chat_id=send_chat_id,
                 photo=open(image_path, 'rb'),
-                caption=step1_text,
+                caption=step4_text,
                 parse_mode='HTML'
             )
-            logger.info(f"✅ Sent Step 1 (amount) message to room {chat_id}")
+            logger.info(f"✅ Sent Step 4 (amount) message to room {chat_id}")
         else:
             await bot.send_message(
                 chat_id=send_chat_id,
-                text=step1_text,
+                text=step4_text,
                 parse_mode='HTML'
             )
-            logger.warning(f"⚠️ Sent Step 1 (text only) to room {chat_id} - image not found")
+            logger.warning(f"⚠️ Sent Step 4 (text only) to room {chat_id} - image not found")
         
-        room_transaction_state[chat_id] = 'step1'
+        room_transaction_state[chat_id] = 'step4_amount'
         
     except Exception as e:
         error_str = str(e).lower()
         if 'timed out' in error_str or 'timeout' in error_str:
-            logger.info(f"⏱️ Step 1 message may have been sent (timeout) to room {chat_id}")
-            room_transaction_state[chat_id] = 'step1'
+            logger.info(f"⏱️ Step 4 message may have been sent (timeout) to room {chat_id}")
+            room_transaction_state[chat_id] = 'step4_amount'
         else:
-            logger.warning(f"❌ Failed to send Step 1 message: {e}")
+            logger.warning(f"❌ Failed to send Step 4 message: {e}")
 
 
-async def send_step2_rate_message(bot, send_chat_id: int, chat_id: int) -> None:
-    """Send Step 2 - Enter rate per USDT message"""
+async def send_step5_rate_message(bot, send_chat_id: int, chat_id: int) -> None:
+    """Send Step 5 - Enter rate per USDT message"""
     try:
-        if room_transaction_state.get(chat_id) != 'step1':
-            logger.warning(f"⚠️ Step 2 called but room not in step1 state")
+        if room_transaction_state.get(chat_id) != 'step4_amount':
+            logger.warning(f"⚠️ Step 5 called but room not in step4_amount state")
             return
         
-        step2_text = "📊 Step 2 - Rate per USDT → Example: 89.5"
+        step5_text = "📊 Step 5 - Rate per USDT → Example: 89.5"
         
         image_path = "step2_rate_image.jpg"
         if os.path.exists(image_path):
             await bot.send_photo(
                 chat_id=send_chat_id,
                 photo=open(image_path, 'rb'),
-                caption=step2_text,
+                caption=step5_text,
                 parse_mode='HTML'
             )
-            logger.info(f"✅ Sent Step 2 (rate) message to room {chat_id}")
+            logger.info(f"✅ Sent Step 5 (rate) message to room {chat_id}")
         else:
             await bot.send_message(
                 chat_id=send_chat_id,
-                text=step2_text,
+                text=step5_text,
                 parse_mode='HTML'
             )
-            logger.warning(f"⚠️ Sent Step 2 (text only) to room {chat_id} - image not found")
+            logger.warning(f"⚠️ Sent Step 5 (text only) to room {chat_id} - image not found")
         
-        room_transaction_state[chat_id] = 'step2'
+        room_transaction_state[chat_id] = 'step5_rate'
         
     except Exception as e:
         error_str = str(e).lower()
         if 'timed out' in error_str or 'timeout' in error_str:
-            logger.info(f"⏱️ Step 2 message may have been sent (timeout) to room {chat_id}")
-            room_transaction_state[chat_id] = 'step2'
+            logger.info(f"⏱️ Step 5 message may have been sent (timeout) to room {chat_id}")
+            room_transaction_state[chat_id] = 'step5_rate'
         else:
-            logger.warning(f"❌ Failed to send Step 2 message: {e}")
+            logger.warning(f"❌ Failed to send Step 5 message: {e}")
 
 
-async def send_step3_payment_message(bot, send_chat_id: int, chat_id: int) -> None:
-    """Send Step 3 - Payment Method message"""
+async def send_step6_payment_message(bot, send_chat_id: int, chat_id: int) -> None:
+    """Send Step 6 - Payment Method message"""
     try:
-        step3_text = "💳 Step 3 - Payment method → Examples: CDM, CASH, CCW"
+        step6_text = "💳 Step 6 - Payment method → Examples: CDM, CASH, CCW"
         
         image_path = "step3_payment_image.jpg"
         if os.path.exists(image_path):
             await bot.send_photo(
                 chat_id=send_chat_id,
                 photo=open(image_path, 'rb'),
-                caption=step3_text,
+                caption=step6_text,
                 parse_mode='HTML'
             )
-            logger.info(f"✅ Sent Step 3 (payment method) message to room {chat_id}")
+            logger.info(f"✅ Sent Step 6 (payment method) message to room {chat_id}")
         else:
             await bot.send_message(
                 chat_id=send_chat_id,
-                text=step3_text,
+                text=step6_text,
                 parse_mode='HTML'
             )
-            logger.warning(f"⚠️ Sent Step 3 (text only) to room {chat_id} - image not found")
+            logger.warning(f"⚠️ Sent Step 6 (text only) to room {chat_id} - image not found")
+        
+        room_transaction_state[chat_id] = 'step6_payment'
         
     except Exception as e:
         error_str = str(e).lower()
         if 'timed out' in error_str or 'timeout' in error_str:
-            logger.info(f"⏱️ Step 3 message may have been sent (timeout) to room {chat_id}")
+            logger.info(f"⏱️ Step 6 message may have been sent (timeout) to room {chat_id}")
+            room_transaction_state[chat_id] = 'step6_payment'
         else:
-            logger.warning(f"❌ Failed to send Step 3 message: {e}")
+            logger.warning(f"❌ Failed to send Step 6 message: {e}")
 
 
-async def send_step4_blockchain_message(bot, send_chat_id: int, chat_id: int) -> None:
-    """Send Step 4 - Blockchain selection message with BSC button"""
+async def send_step2_blockchain_message(bot, send_chat_id: int, chat_id: int) -> None:
+    """Send Step 2 - Blockchain selection message with BSC button"""
     try:
-        step4_text = "🔗 Step 4 – Choose Blockchain"
+        step2_text = "<b>🔗 Step 2 - Choose Blockchain</b>"
         
         keyboard = [[InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2194,34 +2186,37 @@ async def send_step4_blockchain_message(bot, send_chat_id: int, chat_id: int) ->
             msg = await bot.send_photo(
                 chat_id=send_chat_id,
                 photo=open(image_path, 'rb'),
-                caption=step4_text,
+                caption=step2_text,
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
-            step4_messages[chat_id] = msg.message_id
-            logger.info(f"✅ Sent Step 4 (blockchain) message to room {chat_id}")
+            step2_blockchain_messages[chat_id] = msg.message_id
+            logger.info(f"✅ Sent Step 2 (blockchain) message to room {chat_id}")
         else:
             msg = await bot.send_message(
                 chat_id=send_chat_id,
-                text=step4_text,
+                text=step2_text,
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
-            step4_messages[chat_id] = msg.message_id
-            logger.warning(f"⚠️ Sent Step 4 (text only) to room {chat_id} - image not found")
+            step2_blockchain_messages[chat_id] = msg.message_id
+            logger.warning(f"⚠️ Sent Step 2 (text only) to room {chat_id} - image not found")
+        
+        room_transaction_state[chat_id] = 'step2_blockchain'
         
     except Exception as e:
         error_str = str(e).lower()
         if 'timed out' in error_str or 'timeout' in error_str:
-            logger.info(f"⏱️ Step 4 message may have been sent (timeout) to room {chat_id}")
+            logger.info(f"⏱️ Step 2 message may have been sent (timeout) to room {chat_id}")
+            room_transaction_state[chat_id] = 'step2_blockchain'
         else:
-            logger.warning(f"❌ Failed to send Step 4 message: {e}")
+            logger.warning(f"❌ Failed to send Step 2 message: {e}")
 
 
-async def send_step5_coin_message(bot, send_chat_id: int, chat_id: int) -> None:
-    """Send Step 5 - Select Coin message with USDT/USDC buttons"""
+async def send_step3_coin_message(bot, send_chat_id: int, chat_id: int) -> None:
+    """Send Step 3 - Select Coin message with USDT/USDC buttons"""
     try:
-        step5_text = "⚪ Select Coin"
+        step3_text = "<b>⚪ Step 3 - Select Coin</b>"
         
         keyboard = [[
             InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}"),
@@ -2234,31 +2229,31 @@ async def send_step5_coin_message(bot, send_chat_id: int, chat_id: int) -> None:
             msg = await bot.send_photo(
                 chat_id=send_chat_id,
                 photo=open(image_path, 'rb'),
-                caption=step5_text,
+                caption=step3_text,
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
-            step5_messages[chat_id] = msg.message_id
-            logger.info(f"✅ Sent Step 5 (coin selection) message to room {chat_id}")
+            step3_coin_messages[chat_id] = msg.message_id
+            logger.info(f"✅ Sent Step 3 (coin selection) message to room {chat_id}")
         else:
             msg = await bot.send_message(
                 chat_id=send_chat_id,
-                text=step5_text,
+                text=step3_text,
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
-            step5_messages[chat_id] = msg.message_id
-            logger.warning(f"⚠️ Sent Step 5 (text only) to room {chat_id} - image not found")
+            step3_coin_messages[chat_id] = msg.message_id
+            logger.warning(f"⚠️ Sent Step 3 (text only) to room {chat_id} - image not found")
         
-        room_transaction_state[chat_id] = 'step5'
+        room_transaction_state[chat_id] = 'step3_coin'
         
     except Exception as e:
         error_str = str(e).lower()
         if 'timed out' in error_str or 'timeout' in error_str:
-            logger.info(f"⏱️ Step 5 message may have been sent (timeout) to room {chat_id}")
-            room_transaction_state[chat_id] = 'step5'
+            logger.info(f"⏱️ Step 3 message may have been sent (timeout) to room {chat_id}")
+            room_transaction_state[chat_id] = 'step3_coin'
         else:
-            logger.warning(f"❌ Failed to send Step 5 message: {e}")
+            logger.warning(f"❌ Failed to send Step 3 message: {e}")
 
 
 async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> None:
@@ -2379,8 +2374,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         
         logger.info(f"Group message detected in room {chat_id}, using original_chat_id {original_chat_id}")
         
-        # Check if room is waiting for amount input
-        if room_transaction_state.get(original_chat_id) == 'step1':
+        # Check if room is waiting for amount input (Step 4 in new flow)
+        if room_transaction_state.get(original_chat_id) == 'step4_amount':
             try:
                 amount = float(text)
                 if amount < 1:
@@ -2393,16 +2388,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 # Save amount to database
                 database.set_amount(original_chat_id, amount)
                 
-                # Send Step 2 message
+                # Send Step 5 (rate) message
                 send_chat_id = -1000000000000 - original_chat_id
-                await send_step2_rate_message(context.bot, send_chat_id, original_chat_id)
+                await send_step5_rate_message(context.bot, send_chat_id, original_chat_id)
                 return
             except ValueError:
                 await update.message.reply_text("❌ Please enter a valid number")
                 return
         
-        # Check if room is waiting for rate input
-        elif room_transaction_state.get(original_chat_id) == 'step2':
+        # Check if room is waiting for rate input (Step 5 in new flow)
+        elif room_transaction_state.get(original_chat_id) == 'step5_rate':
             try:
                 rate = float(text)
                 if rate < 85:
@@ -2415,17 +2410,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 # Save rate to database
                 database.set_rate(original_chat_id, rate)
                 
-                # Send Step 3 message (Payment Method)
+                # Send Step 6 message (Payment Method)
                 send_chat_id = -1000000000000 - original_chat_id
-                room_transaction_state[original_chat_id] = 'step3'
-                await send_step3_payment_message(context.bot, send_chat_id, original_chat_id)
+                await send_step6_payment_message(context.bot, send_chat_id, original_chat_id)
                 return
             except ValueError:
                 await update.message.reply_text("❌ Please enter a valid number")
                 return
         
-        # Check if room is waiting for payment method input
-        elif room_transaction_state.get(original_chat_id) == 'step3':
+        # Check if room is waiting for payment method input (Step 6 in new flow)
+        elif room_transaction_state.get(original_chat_id) == 'step6_payment':
             # Payment method is case-insensitive - accept UPI, upi, Upi, etc.
             payment_method_upper = text.upper()
             if payment_method_upper not in valid_payment_methods:
@@ -2439,14 +2433,40 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             # Save payment method to database
             database.set_payment_method(original_chat_id, payment_method_upper)
             
-            # Send Step 4 message (Blockchain Selection)
+            # Send Step 7 message (Buyer Wallet Address)
             send_chat_id = -1000000000000 - original_chat_id
-            room_transaction_state[original_chat_id] = 'step4'
-            await send_step4_blockchain_message(context.bot, send_chat_id, original_chat_id)
+            room_transaction_state[original_chat_id] = 'step7_buyer_address'
+            
+            # Get buyer username from room_initiators
+            buyer_username = room_initiators.get(original_chat_id, {}).get('buyer')
+            if buyer_username:
+                try:
+                    step7_text = f"💰 <b>Step 7</b> - @{buyer_username}, enter your BSC wallet address\nstarts with 0x and is 42 chars (0x + 40 hex)"
+                    
+                    image_path = os.path.join(SCRIPT_DIR, "step6_buyer_address_image.jpg")
+                    if os.path.exists(image_path):
+                        msg = await context.bot.send_photo(
+                            chat_id=send_chat_id,
+                            photo=open(image_path, 'rb'),
+                            caption=step7_text,
+                            parse_mode='HTML'
+                        )
+                        buyer_wallet_messages[original_chat_id] = msg.message_id
+                        logger.info(f"✅ Sent buyer wallet message to room {original_chat_id}")
+                    else:
+                        msg = await context.bot.send_message(
+                            chat_id=send_chat_id,
+                            text=step7_text,
+                            parse_mode='HTML'
+                        )
+                        buyer_wallet_messages[original_chat_id] = msg.message_id
+                        logger.warning(f"⚠️ Sent buyer wallet (text only) to room {original_chat_id} - image not found")
+                except Exception as e:
+                    logger.warning(f"Could not send buyer wallet message: {e}")
             return
         
         # Check if room is waiting for buyer wallet address input
-        elif room_transaction_state.get(original_chat_id) == 'step6_buyer_address':
+        elif room_transaction_state.get(original_chat_id) == 'step7_buyer_address':
             # Check if this user is the buyer
             if original_chat_id in room_initiators:
                 buyer_username = room_initiators[original_chat_id].get('buyer')
@@ -3175,11 +3195,12 @@ async def send_role_selection_message(bot, send_chat_id: int, room_name: str, or
             user_roles[original_chat_id] = {}
         
         role_text = (
+            "<b>📋 Step 1 - Select Roles</b>\n\n"
             "<b>⚠️ Choose roles accordingly</b>\n\n"
             "<b>As release & refund happen according to roles</b>\n\n"
             "<b>Refund goes to seller & release to buyer</b>\n\n"
-            f"<b>⏳</b> @{initiator_username} - Waiting...\n"
-            f"<b>⏳</b> @{counterparty_username} - Waiting..."
+            f"⏳ @{initiator_username} - Waiting...\n"
+            f"⏳ @{counterparty_username} - Waiting..."
         )
         
         # Create buttons side by side
