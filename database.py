@@ -20,6 +20,14 @@ from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 import secrets
 import string
+import base64
+
+# Encryption for wallet private keys
+try:
+    from cryptography.fernet import Fernet
+    FERNET_AVAILABLE = True
+except ImportError:
+    FERNET_AVAILABLE = False
 
 load_dotenv()
 
@@ -612,6 +620,210 @@ def delete_deal(chat_id: int) -> bool:
         return False
 
 
+# ============================================================================
+# USER WALLET FUNCTIONS
+# ============================================================================
+
+def get_fernet_key():
+    """Get or generate Fernet encryption key for wallet private keys"""
+    key = os.getenv('WALLET_FERNET_KEY')
+    if key:
+        return key.encode() if isinstance(key, str) else key
+    
+    # Generate a new key if not set (WARNING: this should be set in production!)
+    logger.warning("WALLET_FERNET_KEY not set - generating temporary key (wallets won't persist across restarts without this!)")
+    return Fernet.generate_key()
+
+
+def encrypt_private_key(private_key: str) -> str:
+    """Encrypt a private key for storage"""
+    if not FERNET_AVAILABLE:
+        logger.warning("Fernet not available - storing key unencrypted (NOT RECOMMENDED)")
+        return private_key
+    
+    try:
+        fernet = Fernet(get_fernet_key())
+        encrypted = fernet.encrypt(private_key.encode())
+        return base64.b64encode(encrypted).decode()
+    except Exception as e:
+        logger.error(f"Error encrypting private key: {e}")
+        return private_key
+
+
+def decrypt_private_key(encrypted_key: str) -> str:
+    """Decrypt a stored private key"""
+    if not FERNET_AVAILABLE:
+        return encrypted_key
+    
+    try:
+        fernet = Fernet(get_fernet_key())
+        encrypted_bytes = base64.b64decode(encrypted_key.encode())
+        decrypted = fernet.decrypt(encrypted_bytes)
+        return decrypted.decode()
+    except Exception as e:
+        logger.error(f"Error decrypting private key: {e}")
+        return encrypted_key
+
+
+def init_user_wallets_table():
+    """Initialize the user_wallets table"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.warning("Could not connect to database for wallet table")
+            return False
+        
+        cur = conn.cursor()
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_wallets (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                network VARCHAR(10) NOT NULL,
+                address VARCHAR(100) NOT NULL,
+                encrypted_private_key TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, network)
+            )
+        """)
+        
+        # Create indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_wallets_user_id ON user_wallets(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_wallets_network ON user_wallets(network)")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("User wallets table initialized successfully")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not initialize user wallets table: {e}")
+        return False
+
+
+def save_user_wallet(user_id: int, network: str, address: str, private_key: str) -> bool:
+    """Save a user's wallet address and encrypted private key to the database"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        
+        encrypted_key = encrypt_private_key(private_key)
+        
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO user_wallets (user_id, network, address, encrypted_private_key, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id, network) DO UPDATE SET
+                address = EXCLUDED.address,
+                encrypted_private_key = EXCLUDED.encrypted_private_key,
+                updated_at = CURRENT_TIMESTAMP
+        """, (user_id, network, address, encrypted_key))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        logger.info(f"Saved wallet for user {user_id} on {network}: {address}")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not save user wallet: {e}")
+        return False
+
+
+def get_user_wallet(user_id: int, network: str) -> Optional[Dict[str, str]]:
+    """Get a user's wallet address and private key from the database"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT address, encrypted_private_key 
+            FROM user_wallets 
+            WHERE user_id = %s AND network = %s
+        """, (user_id, network))
+        
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if row:
+            return {
+                'address': row['address'],
+                'private_key': decrypt_private_key(row['encrypted_private_key']) if row['encrypted_private_key'] else ''
+            }
+        return None
+    except Exception as e:
+        logger.warning(f"Could not get user wallet: {e}")
+        return None
+
+
+def get_all_user_wallets(user_id: int) -> Dict[str, Dict[str, str]]:
+    """Get all wallet addresses for a user"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {}
+        
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT network, address, encrypted_private_key 
+            FROM user_wallets 
+            WHERE user_id = %s
+        """, (user_id,))
+        
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        wallets = {}
+        for row in rows:
+            wallets[row['network']] = {
+                'address': row['address'],
+                'private_key': decrypt_private_key(row['encrypted_private_key']) if row['encrypted_private_key'] else ''
+            }
+        return wallets
+    except Exception as e:
+        logger.warning(f"Could not get user wallets: {e}")
+        return {}
+
+
+def load_all_wallets() -> Dict[int, Dict[str, Dict[str, str]]]:
+    """Load all user wallets from database (for bot startup)"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {}
+        
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT user_id, network, address, encrypted_private_key FROM user_wallets")
+        
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        all_wallets = {}
+        for row in rows:
+            user_id = row['user_id']
+            if user_id not in all_wallets:
+                all_wallets[user_id] = {}
+            
+            all_wallets[user_id][row['network']] = {
+                'address': row['address'],
+                'private_key': decrypt_private_key(row['encrypted_private_key']) if row['encrypted_private_key'] else ''
+            }
+        
+        logger.info(f"Loaded {len(all_wallets)} user wallets from database")
+        return all_wallets
+    except Exception as e:
+        logger.warning(f"Could not load wallets from database: {e}")
+        return {}
+
+
 # Initialize database on module import
 if __name__ != "__main__":
     init_database()
+    init_user_wallets_table()

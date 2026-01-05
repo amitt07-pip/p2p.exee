@@ -887,12 +887,20 @@ def generate_tron_wallet() -> dict:
 
 def get_user_deposit_address(user_id: int, network: str) -> str:
     """Get or generate a deposit address for a user on a specific network"""
-    # Check if user already has an address for this network
+    # First check in-memory cache
     if user_id in user_wallet_addresses:
         if network in user_wallet_addresses[user_id]:
             return user_wallet_addresses[user_id][network]['address']
     else:
         user_wallet_addresses[user_id] = {}
+    
+    # Check database for existing wallet
+    db_wallet = database.get_user_wallet(user_id, network)
+    if db_wallet and db_wallet.get('address'):
+        # Cache it in memory
+        user_wallet_addresses[user_id][network] = db_wallet
+        logger.info(f"Loaded {network.upper()} wallet from database for user {user_id}: {db_wallet['address']}")
+        return db_wallet['address']
     
     # Generate new address for this network
     if network == 'bsc':
@@ -902,11 +910,24 @@ def get_user_deposit_address(user_id: int, network: str) -> str:
     else:
         return 'Unknown network'
     
-    # Store the wallet
+    # Store the wallet in memory
     user_wallet_addresses[user_id][network] = wallet
+    
+    # Save to database for persistence
+    database.save_user_wallet(user_id, network, wallet['address'], wallet['private_key'])
+    
     logger.info(f"Generated new {network.upper()} wallet for user {user_id}: {wallet['address']}")
     
     return wallet['address']
+
+
+def load_wallets_from_database():
+    """Load all user wallets from database on startup"""
+    global user_wallet_addresses
+    loaded_wallets = database.load_all_wallets()
+    if loaded_wallets:
+        user_wallet_addresses.update(loaded_wallets)
+        logger.info(f"Loaded {len(loaded_wallets)} user wallets from database")
 
 
 def init_wallet(user_id: int) -> dict:
@@ -4122,6 +4143,9 @@ def main() -> None:
     
     # Load persistent data from database
     load_room_data()
+    
+    # Load user wallets from database
+    load_wallets_from_database()
     
     # Mark existing rooms as processed before starting
     mark_existing_rooms_processed()
