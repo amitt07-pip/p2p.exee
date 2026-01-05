@@ -3272,8 +3272,6 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
         # Create deal record in database
         database.create_deal(
             chat_id=chat_id,
-            initiator_username=initiator_username,
-            counterparty_username=counterparty_username,
             room_name=room_name
         )
         logger.info(f"📊 Deal record created in database for {room_name}")
