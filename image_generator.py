@@ -37,7 +37,7 @@ def generate_room_image(room_number, output_path="room_profile.jpg"):
     text = f" {room_number}"
     text_color = (255, 255, 255)
     
-    text_x = 435
+    text_x = 410
     text_y = 280
     
     draw.text((text_x, text_y), text, fill=text_color, font=font)
