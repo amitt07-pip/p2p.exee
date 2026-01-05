@@ -1535,28 +1535,13 @@ Amount Released: {amount_released:.4f} {coin}
 Remaining: {network_fee:.4f} {coin}
 🔗 Transaction: <a href="{tx_url}">Click Here</a>"""
             
-            # Create close deal button
-            keyboard = [[InlineKeyboardButton("❌ Close Deal", callback_data=f"close_deal_{original_chat_id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            # Send the Partial Release Complete message
-            image_path = os.path.join(SCRIPT_DIR, "deal_complete_image.jpg")
+            # Send the Partial Release Complete message (text only, no image or button)
             try:
-                if os.path.exists(image_path):
-                    await context.bot.send_photo(
-                        chat_id=send_chat_id,
-                        photo=open(image_path, 'rb'),
-                        caption=partial_release_text,
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=send_chat_id,
-                        text=partial_release_text,
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
+                await context.bot.send_message(
+                    chat_id=send_chat_id,
+                    text=partial_release_text,
+                    parse_mode='HTML'
+                )
                 logger.info(f"✅ Sent Partial Release Complete message to room {original_chat_id}")
             except Exception as e:
                 logger.warning(f"Could not send Partial Release Complete message: {e}")
