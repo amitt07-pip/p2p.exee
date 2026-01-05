@@ -28,17 +28,17 @@ def generate_room_image(room_number, output_path="room_profile.jpg"):
     poppins_font_path = os.path.join(SCRIPT_DIR, "fonts", "Poppins-Bold.ttf")
     try:
         if os.path.exists(poppins_font_path):
-            font = ImageFont.truetype(poppins_font_path, 58)
+            font = ImageFont.truetype(poppins_font_path, 68)
         else:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 58)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 68)
     except:
         font = ImageFont.load_default()
     
     text = f" {room_number}"
     text_color = (255, 255, 255)
     
-    text_x = 410
-    text_y = 280
+    text_x = 435
+    text_y = 275
     
     draw.text((text_x, text_y), text, fill=text_color, font=font)
     
