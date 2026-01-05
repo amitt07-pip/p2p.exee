@@ -116,9 +116,24 @@ async def create_deal_room(client, initiator_username, counterparty_username, bo
         room_counter += 1
         
         logger.info(f"Creating deal room: {room_name}")
+        
+        # Group description with available commands
+        group_description = """📋 NOTES
+ALL COMMANDS ARE CASE-SENSITIVE
+
+/restart - Restart A Trade
+
+/release - Release Funds To Buyer
+
+/verify <Address> - Verify A Wallet Address Before Starting A Trade
+
+/balance - Check Available Balance For Current Trade
+
+/dispute <reason> - Report"""
+        
         result = await client(CreateChannelRequest(
             title=room_name,
-            about="",
+            about=group_description,
             megagroup=True
         ))
         
