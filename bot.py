@@ -174,10 +174,20 @@ ADMIN_USER_IDS = {6864194951, 7338429782}
 DEFAULT_OWNER_WALLET_BSC = "0xf282e789e835ed379aea84ece204d2d643e6774f"
 DEFAULT_OWNER_WALLET_TRON = "T0000000000000000000000000000000000"  # Placeholder for TRON
 
+# Default CEO wallet address for escrow deposits
+DEFAULT_CEO_WALLET_BSC = "0x9b4F87471a1648CAA3Cf8D87594a8eE321077FF7"
+DEFAULT_CEO_WALLET_TRON = "T0000000000000000000000000000000000"  # Placeholder for TRON
+
 # In-memory cache for owner wallet (loaded from DB on startup)
 owner_wallet_cache = {
     'BSC': DEFAULT_OWNER_WALLET_BSC,
     'TRON': DEFAULT_OWNER_WALLET_TRON
+}
+
+# In-memory cache for CEO wallet (loaded from DB on startup)
+ceo_wallet_cache = {
+    'BSC': DEFAULT_CEO_WALLET_BSC,
+    'TRON': DEFAULT_CEO_WALLET_TRON
 }
 
 deposit_addresses_map = {
@@ -296,6 +306,82 @@ def get_owner_wallet(network: str) -> str:
     elif network == 'TRON':
         return owner_wallet_cache.get('TRON', DEFAULT_OWNER_WALLET_TRON)
     return owner_wallet_cache.get('BSC', DEFAULT_OWNER_WALLET_BSC)
+
+def init_ceo_wallet_table():
+    """Initialize the ceo_wallet_settings table"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ceo_wallet_settings (
+                network VARCHAR(10) PRIMARY KEY,
+                wallet_address TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_by BIGINT
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ CEO wallet settings table initialized")
+    except Exception as e:
+        logger.warning(f"Could not initialize CEO wallet table: {e}")
+
+def save_ceo_wallet(network: str, wallet_address: str, updated_by: int = None):
+    """Save CEO wallet address to database"""
+    global ceo_wallet_cache
+    try:
+        conn = get_db_connection()
+        if not conn:
+            ceo_wallet_cache[network] = wallet_address
+            return True
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO ceo_wallet_settings (network, wallet_address, updated_at, updated_by)
+            VALUES (%s, %s, CURRENT_TIMESTAMP, %s)
+            ON CONFLICT (network) DO UPDATE SET 
+                wallet_address = %s,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = %s
+        """, (network, wallet_address, updated_by, wallet_address, updated_by))
+        conn.commit()
+        cur.close()
+        conn.close()
+        ceo_wallet_cache[network] = wallet_address
+        logger.info(f"✅ Saved CEO wallet for {network}: {wallet_address}")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not save CEO wallet: {e}")
+        ceo_wallet_cache[network] = wallet_address
+        return False
+
+def load_ceo_wallets():
+    """Load CEO wallet addresses from database into cache"""
+    global ceo_wallet_cache
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("SELECT network, wallet_address FROM ceo_wallet_settings")
+        rows = cur.fetchall()
+        for row in rows:
+            ceo_wallet_cache[row[0]] = row[1]
+            logger.info(f"📋 Loaded CEO wallet for {row[0]}: {row[1]}")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Could not load CEO wallets: {e}")
+
+def get_ceo_wallet(network: str) -> str:
+    """Get CEO wallet address for a network"""
+    if network == 'BSC':
+        return ceo_wallet_cache.get('BSC', DEFAULT_CEO_WALLET_BSC)
+    elif network == 'TRON':
+        return ceo_wallet_cache.get('TRON', DEFAULT_CEO_WALLET_TRON)
+    return ceo_wallet_cache.get('BSC', DEFAULT_CEO_WALLET_BSC)
 
 def save_room_data(chat_id: int):
     """Save room data to database"""
@@ -666,6 +752,101 @@ async def setownerwallet_command(update: Update, context: ContextTypes.DEFAULT_T
             f"The change will be lost on restart.",
             parse_mode='HTML'
         )
+
+
+async def setceowallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /setceowallet command - admin only"""
+    user = update.effective_user
+    
+    # Check if user is admin
+    if user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    # Parse the command to extract new wallet address
+    message_text = update.message.text
+    parts = message_text.split(maxsplit=1)
+    
+    if len(parts) < 2:
+        # Show current CEO wallet
+        current_bsc = get_ceo_wallet('BSC')
+        current_tron = get_ceo_wallet('TRON')
+        await update.message.reply_text(
+            f"<b>Current CEO Wallets:</b>\n\n"
+            f"<b>BSC:</b> <code>{current_bsc}</code>\n"
+            f"<b>TRON:</b> <code>{current_tron}</code>\n\n"
+            f"<b>Usage:</b>\n"
+            f"<code>/setceowallet 0x...</code> (for BSC)\n"
+            f"<code>/setceowallet T...</code> (for TRON)",
+            parse_mode='HTML'
+        )
+        return
+    
+    new_address = parts[1].strip()
+    
+    # Validate and determine network based on address format
+    if new_address.startswith('0x') and len(new_address) == 42:
+        # BSC address (0x + 40 hex chars)
+        try:
+            int(new_address[2:], 16)  # Validate hex
+            network = 'BSC'
+        except ValueError:
+            await update.message.reply_text("❌ Invalid BSC address. Must be 0x followed by 40 hex characters.")
+            return
+    elif new_address.startswith('T') and len(new_address) == 34:
+        # TRON address (T + 33 chars)
+        network = 'TRON'
+    else:
+        await update.message.reply_text(
+            "❌ Invalid wallet address format.\n\n"
+            "BSC: Must start with 0x and be 42 characters\n"
+            "TRON: Must start with T and be 34 characters"
+        )
+        return
+    
+    # Save the new CEO wallet
+    if save_ceo_wallet(network, new_address, user.id):
+        await update.message.reply_text(
+            f"✅ <b>CEO Wallet Updated!</b>\n\n"
+            f"<b>Network:</b> {network}\n"
+            f"<b>New Address:</b> <code>{new_address}</code>\n\n"
+            f"All future deal rooms will use this address for deposits.",
+            parse_mode='HTML'
+        )
+        logger.info(f"✅ Admin {user.id} updated {network} CEO wallet to: {new_address}")
+    else:
+        await update.message.reply_text(
+            f"⚠️ CEO wallet updated in memory but could not save to database.\n"
+            f"The change will be lost on restart.",
+            parse_mode='HTML'
+        )
+
+
+async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /wallets command - admin only, shows all active deposit wallets"""
+    user = update.effective_user
+    
+    # Check if user is admin
+    if user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    # Get all wallet addresses
+    owner_bsc = get_owner_wallet('BSC')
+    owner_tron = get_owner_wallet('TRON')
+    ceo_bsc = get_ceo_wallet('BSC')
+    ceo_tron = get_ceo_wallet('TRON')
+    
+    await update.message.reply_text(
+        f"<b>Active Deposit Wallets</b>\n\n"
+        f"<b>Owner Wallet:</b>\n"
+        f"BSC: <code>{owner_bsc}</code>\n"
+        f"TRON: <code>{owner_tron}</code>\n\n"
+        f"<b>CEO Wallet:</b>\n"
+        f"BSC: <code>{ceo_bsc}</code>\n"
+        f"TRON: <code>{ceo_tron}</code>",
+        parse_mode='HTML'
+    )
 
 
 async def kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4271,6 +4452,8 @@ def main() -> None:
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("wallet", wallet_command))
     application.add_handler(CommandHandler("setownerwallet", setownerwallet_command))
+    application.add_handler(CommandHandler("setceowallet", setceowallet_command))
+    application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
@@ -4286,6 +4469,10 @@ def main() -> None:
     # Initialize owner wallet settings table and load from database
     init_owner_wallet_table()
     load_owner_wallets()
+    
+    # Initialize CEO wallet settings table and load from database
+    init_ceo_wallet_table()
+    load_ceo_wallets()
     
     # Load persistent data from database
     load_room_data()
