@@ -1362,6 +1362,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             user_id = query.from_user.id
             send_chat_id = get_send_chat_id(chat_id)
             
+            # Save user ID for bio detection later
+            username = query.from_user.username
+            if username:
+                save_user_id(username, user_id)
+            
+            # Get selected blockchain
+            selected_blockchain = user_blockchain.get(chat_id, 'BSC')
+            
+            # Reject USDC selection if TRON is selected (TRON only supports USDT)
+            if coin_type == 'USDC' and selected_blockchain == 'TRON':
+                await query.answer("❌ TRON only supports USDT", show_alert=True)
+                return CHOOSING
+            
             # Idempotency guard - check if coin already selected
             if chat_id in user_coins and user_coins[chat_id] == coin_type:
                 await query.answer(f"✅ {coin_type} already selected")
@@ -1373,11 +1386,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Save coin to database
             database.set_coin(chat_id, coin_type)
             
-            # Update buttons (no selection indicator)
-            new_keyboard = [[
-                InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}_done"),
-                InlineKeyboardButton("USDC", callback_data=f"coin_usdc_{chat_id}_done")
-            ]]
+            # Update buttons based on blockchain (TRON only shows USDT)
+            if selected_blockchain == 'TRON':
+                new_keyboard = [[InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}_done")]]
+            else:
+                new_keyboard = [[
+                    InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}_done"),
+                    InlineKeyboardButton("USDC", callback_data=f"coin_usdc_{chat_id}_done")
+                ]]
             reply_markup = InlineKeyboardMarkup(new_keyboard)
             
             try:
@@ -2119,10 +2135,17 @@ async def send_step4_amount_message(bot, send_chat_id: int, chat_id: int) -> Non
         # Get the selected coin (default to USDT)
         selected_coin = user_coins.get(chat_id, 'USDT')
         
+        # Get the selected blockchain and calculate network fee
+        selected_chain = user_blockchain.get(chat_id, 'BSC')
+        if selected_chain == 'TRON':
+            network_fee = 3
+        else:  # BSC
+            network_fee = 0.2
+        
         step4_text = (
             f"<b>💰 Step 4 - Enter {selected_coin} Amount</b>\n\n"
-            "Chain: BSC\n"
-            f"Network Fee: 0.2 {selected_coin}\n\n"
+            f"Chain: {selected_chain}\n"
+            f"Network Fee: {network_fee} {selected_coin}\n\n"
             "Enter amount including fee → Example: 1000"
         )
         
