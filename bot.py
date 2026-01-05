@@ -166,6 +166,20 @@ payment_confirmations = {}  # Track payment confirmations: {chat_id: {'sent': bo
 room_awaiting_hash = {}  # Track which rooms are awaiting transaction hash: {chat_id: 'awaiting_hash'}
 room_creation_times = {}  # Track when each room was created for time calculation: {chat_id: timestamp}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
+
+# Admin user IDs who can use admin commands like /setownerwallet
+ADMIN_USER_IDS = {6864194951, 7338429782}
+
+# Default owner wallet address for escrow deposits
+DEFAULT_OWNER_WALLET_BSC = "0xf282e789e835ed379aea84ece204d2d643e6774f"
+DEFAULT_OWNER_WALLET_TRON = "T0000000000000000000000000000000000"  # Placeholder for TRON
+
+# In-memory cache for owner wallet (loaded from DB on startup)
+owner_wallet_cache = {
+    'BSC': DEFAULT_OWNER_WALLET_BSC,
+    'TRON': DEFAULT_OWNER_WALLET_TRON
+}
+
 deposit_addresses_map = {
     ("BSC", "USDT"): "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
     ("BSC", "USDC"): "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
@@ -206,6 +220,82 @@ def save_user_id(username: str, user_id: int):
 def get_user_id(username: str) -> int:
     """Get user_id from username"""
     return user_id_map.get(username.lower())
+
+def init_owner_wallet_table():
+    """Initialize the owner_wallet_settings table"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS owner_wallet_settings (
+                network VARCHAR(10) PRIMARY KEY,
+                wallet_address TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_by BIGINT
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ Owner wallet settings table initialized")
+    except Exception as e:
+        logger.warning(f"Could not initialize owner wallet table: {e}")
+
+def save_owner_wallet(network: str, wallet_address: str, updated_by: int = None):
+    """Save owner wallet address to database"""
+    global owner_wallet_cache
+    try:
+        conn = get_db_connection()
+        if not conn:
+            owner_wallet_cache[network] = wallet_address
+            return True
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO owner_wallet_settings (network, wallet_address, updated_at, updated_by)
+            VALUES (%s, %s, CURRENT_TIMESTAMP, %s)
+            ON CONFLICT (network) DO UPDATE SET 
+                wallet_address = %s,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = %s
+        """, (network, wallet_address, updated_by, wallet_address, updated_by))
+        conn.commit()
+        cur.close()
+        conn.close()
+        owner_wallet_cache[network] = wallet_address
+        logger.info(f"✅ Saved owner wallet for {network}: {wallet_address}")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not save owner wallet: {e}")
+        owner_wallet_cache[network] = wallet_address
+        return False
+
+def load_owner_wallets():
+    """Load owner wallet addresses from database into cache"""
+    global owner_wallet_cache
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("SELECT network, wallet_address FROM owner_wallet_settings")
+        rows = cur.fetchall()
+        for row in rows:
+            owner_wallet_cache[row[0]] = row[1]
+            logger.info(f"📋 Loaded owner wallet for {row[0]}: {row[1]}")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Could not load owner wallets: {e}")
+
+def get_owner_wallet(network: str) -> str:
+    """Get owner wallet address for a network"""
+    if network == 'BSC':
+        return owner_wallet_cache.get('BSC', DEFAULT_OWNER_WALLET_BSC)
+    elif network == 'TRON':
+        return owner_wallet_cache.get('TRON', DEFAULT_OWNER_WALLET_TRON)
+    return owner_wallet_cache.get('BSC', DEFAULT_OWNER_WALLET_BSC)
 
 def save_room_data(chat_id: int):
     """Save room data to database"""
@@ -507,6 +597,74 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.message.reply_text(
             "❌ Error creating deal room. Please try again."
+        )
+
+
+async def setownerwallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /setownerwallet command - admin only"""
+    user = update.effective_user
+    
+    # Check if user is admin
+    if user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+    
+    # Parse the command to extract new wallet address
+    message_text = update.message.text
+    parts = message_text.split(maxsplit=1)
+    
+    if len(parts) < 2:
+        # Show current owner wallet
+        current_bsc = get_owner_wallet('BSC')
+        current_tron = get_owner_wallet('TRON')
+        await update.message.reply_text(
+            f"<b>Current Owner Wallets:</b>\n\n"
+            f"<b>BSC:</b> <code>{current_bsc}</code>\n"
+            f"<b>TRON:</b> <code>{current_tron}</code>\n\n"
+            f"<b>Usage:</b>\n"
+            f"<code>/setownerwallet 0x...</code> (for BSC)\n"
+            f"<code>/setownerwallet T...</code> (for TRON)",
+            parse_mode='HTML'
+        )
+        return
+    
+    new_address = parts[1].strip()
+    
+    # Validate and determine network based on address format
+    if new_address.startswith('0x') and len(new_address) == 42:
+        # BSC address (0x + 40 hex chars)
+        try:
+            int(new_address[2:], 16)  # Validate hex
+            network = 'BSC'
+        except ValueError:
+            await update.message.reply_text("❌ Invalid BSC address. Must be 0x followed by 40 hex characters.")
+            return
+    elif new_address.startswith('T') and len(new_address) == 34:
+        # TRON address (T + 33 chars)
+        network = 'TRON'
+    else:
+        await update.message.reply_text(
+            "❌ Invalid wallet address format.\n\n"
+            "BSC: Must start with 0x and be 42 characters\n"
+            "TRON: Must start with T and be 34 characters"
+        )
+        return
+    
+    # Save the new owner wallet
+    if save_owner_wallet(network, new_address, user.id):
+        await update.message.reply_text(
+            f"✅ <b>Owner Wallet Updated!</b>\n\n"
+            f"<b>Network:</b> {network}\n"
+            f"<b>New Address:</b> <code>{new_address}</code>\n\n"
+            f"All future deal rooms will use this address for deposits.",
+            parse_mode='HTML'
+        )
+        logger.info(f"✅ Admin {user.id} updated {network} owner wallet to: {new_address}")
+    else:
+        await update.message.reply_text(
+            f"⚠️ Owner wallet updated in memory but could not save to database.\n"
+            f"The change will be lost on restart.",
+            parse_mode='HTML'
         )
 
 
@@ -1822,21 +1980,9 @@ Release has been declined by the seller."""
                     blockchain = user_blockchain.get(chat_id, "BSC")
                     coin_type = coin if coin else "USDT"
                     
-                    # Handle rotating addresses for USDT BSC and USDC BSC
-                    if blockchain == "BSC" and coin_type == "USDT":
-                        global usdt_bsc_address_index
-                        current_index = usdt_bsc_address_index
-                        deposit_address = USDT_BSC_ADDRESSES[current_index]
-                        usdt_bsc_address_index = (usdt_bsc_address_index + 1) % len(USDT_BSC_ADDRESSES)
-                        logger.info(f"🔄 Using USDT BSC address {current_index + 1}: {deposit_address}")
-                    elif blockchain == "BSC" and coin_type == "USDC":
-                        global usdc_bsc_address_index
-                        current_index = usdc_bsc_address_index
-                        deposit_address = USDC_BSC_ADDRESSES[current_index]
-                        usdc_bsc_address_index = (usdc_bsc_address_index + 1) % len(USDC_BSC_ADDRESSES)
-                        logger.info(f"🔄 Using USDC BSC address {current_index + 1}: {deposit_address}")
-                    else:
-                        deposit_address = deposit_addresses_map.get((blockchain, coin_type), "0xDA4c2a5B876b0c7521e1c752690D8705080000fE")
+                    # Use owner wallet for all deposits
+                    deposit_address = get_owner_wallet(blockchain)
+                    logger.info(f"🏦 Using owner wallet for {blockchain}: {deposit_address}")
                     
                     # Confirm deal in database with escrow address
                     database.confirm_deal(chat_id, escrow_address=deposit_address)
@@ -4124,6 +4270,7 @@ def main() -> None:
     application.add_handler(CommandHandler("link", link_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("wallet", wallet_command))
+    application.add_handler(CommandHandler("setownerwallet", setownerwallet_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
@@ -4135,6 +4282,10 @@ def main() -> None:
     
     # Initialize deals database table
     database.init_database()
+    
+    # Initialize owner wallet settings table and load from database
+    init_owner_wallet_table()
+    load_owner_wallets()
     
     # Load persistent data from database
     load_room_data()
