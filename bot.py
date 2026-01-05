@@ -190,6 +190,41 @@ ceo_wallet_cache = {
     'TRON': DEFAULT_CEO_WALLET_TRON
 }
 
+# Wallet rotation index (alternates between owner and CEO wallet)
+wallet_rotation_index = 0
+
+def get_rotating_deposit_wallet(network: str) -> str:
+    """Get deposit wallet address with rotation between owner and CEO wallets"""
+    global wallet_rotation_index
+    wallet_rotation_index = (wallet_rotation_index + 1) % 2
+    if wallet_rotation_index == 0:
+        return get_owner_wallet(network)
+    else:
+        return get_ceo_wallet(network)
+
+# BEP20/TRC20 Token contract addresses for verification
+TOKEN_CONTRACTS = {
+    'BSC': {
+        'USDT': '0x55d398326f99059fF775485246999027B3197955',  # BSC USDT
+        'USDC': '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',  # BSC USDC
+    },
+    'TRON': {
+        'USDT': 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',  # TRC20 USDT
+    }
+}
+
+# Token decimals
+TOKEN_DECIMALS = {
+    'USDT': 18,  # BSC USDT has 18 decimals
+    'USDC': 18,  # BSC USDC has 18 decimals
+    'BNB': 18,   # Native BNB
+    'TRX': 6,    # Native TRX
+    'USDT_TRON': 6,  # TRC20 USDT has 6 decimals
+}
+
+# Transfer event signature (keccak256 of "Transfer(address,address,uint256)")
+TRANSFER_EVENT_SIGNATURE = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+
 deposit_addresses_map = {
     ("BSC", "USDT"): "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
     ("BSC", "USDC"): "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
@@ -2161,9 +2196,9 @@ Release has been declined by the seller."""
                     blockchain = user_blockchain.get(chat_id, "BSC")
                     coin_type = coin if coin else "USDT"
                     
-                    # Use owner wallet for all deposits
-                    deposit_address = get_owner_wallet(blockchain)
-                    logger.info(f"🏦 Using owner wallet for {blockchain}: {deposit_address}")
+                    # Use rotating wallet (owner/CEO) for deposits
+                    deposit_address = get_rotating_deposit_wallet(blockchain)
+                    logger.info(f"🏦 Using rotating wallet for {blockchain}: {deposit_address}")
                     
                     # Confirm deal in database with escrow address
                     database.confirm_deal(chat_id, escrow_address=deposit_address)
@@ -2614,9 +2649,12 @@ Once you've sent the amount, tap the button below."""
     return CHOOSING
 
 
-async def verify_transaction_bscscan(tx_hash: str, escrow_address: str) -> dict:
+async def verify_transaction_bscscan(tx_hash: str, escrow_address: str, token: str = 'USDT') -> dict:
     """
-    Verify transaction on BSCscan
+    Verify transaction on BSCscan - properly handles BEP20 token transfers
+    For BEP20 tokens (USDT/USDC), parses transaction receipt logs to find Transfer events
+    For native BNB, checks tx.to and tx.value directly
+    
     Returns: {
         'valid': bool,
         'amount': str,
@@ -2635,21 +2673,21 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str) -> dict:
         if not tx_hash.startswith('0x'):
             tx_hash = '0x' + tx_hash
         
-        # Accept any hash that's at least 32 chars and is hex format
-        if len(tx_hash) < 32:
-            logger.error(f"❌ Invalid transaction hash length: {len(tx_hash)} (minimum 32)")
+        # Validate hash length (should be 66 chars: 0x + 64 hex)
+        if len(tx_hash) != 66:
+            logger.error(f"❌ Invalid transaction hash length: {len(tx_hash)} (expected 66)")
             return {
                 'valid': False,
                 'amount': None,
                 'from_address': None,
                 'to_address': None,
                 'block_number': None,
-                'error': f'❌ Invalid transaction hash format (must be at least 32 characters)'
+                'error': f'❌ Invalid transaction hash format (must be 66 characters including 0x)'
             }
         
-        # Try to validate it's hex
+        # Validate it's hex
         try:
-            int(tx_hash.replace('0x', ''), 16)
+            int(tx_hash[2:], 16)
         except ValueError:
             logger.error(f"❌ Transaction hash contains non-hex characters")
             return {
@@ -2661,9 +2699,8 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str) -> dict:
                 'error': f'❌ Transaction hash must contain only hexadecimal characters (0-9, a-f)'
             }
         
-        logger.info(f"🔍 Verifying transaction: {tx_hash} to escrow: {escrow_address}")
+        logger.info(f"🔍 Verifying BSC transaction: {tx_hash} to escrow: {escrow_address} for token: {token}")
         
-        # BSCscan API V1 endpoint (more reliable)
         api_url = "https://api.bscscan.com/api"
         bscscan_api_key = os.getenv('BSCSCAN_API_KEY', '')
         
@@ -2675,22 +2712,75 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str) -> dict:
                 'from_address': None,
                 'to_address': None,
                 'block_number': None,
-                'error': '❌ API key not configured'
+                'error': '❌ BSCScan API key not configured'
             }
         
-        # Get transaction details using V1 API
+        # For native BNB transfers, check transaction directly
+        if token == 'BNB':
+            params = {
+                'module': 'proxy',
+                'action': 'eth_getTransactionByHash',
+                'txhash': tx_hash,
+                'apikey': bscscan_api_key
+            }
+            
+            response = requests.get(api_url, params=params, timeout=15)
+            data = response.json()
+            
+            if not data.get('result') or not isinstance(data.get('result'), dict):
+                logger.error(f"❌ Transaction not found on BSC: {tx_hash}")
+                return {
+                    'valid': False,
+                    'amount': None,
+                    'from_address': None,
+                    'to_address': None,
+                    'block_number': None,
+                    'error': '❌ Transaction not found on BSC network'
+                }
+            
+            tx_data = data['result']
+            from_address = (tx_data.get('from') or '').lower()
+            to_address = (tx_data.get('to') or '').lower()
+            value_hex = tx_data.get('value', '0x0')
+            block_number = tx_data.get('blockNumber', 'N/A')
+            
+            # Check if recipient is the escrow address
+            if to_address != escrow_address:
+                logger.warning(f"❌ BNB sent to {to_address}, not escrow {escrow_address}")
+                return {
+                    'valid': False,
+                    'amount': None,
+                    'from_address': None,
+                    'to_address': None,
+                    'block_number': None,
+                    'error': f'❌ Transaction not sent to escrow address'
+                }
+            
+            # Convert BNB value (18 decimals)
+            value_wei = int(value_hex, 16)
+            value_bnb = value_wei / 1e18
+            
+            logger.info(f"✅ BNB transaction verified! Amount: {value_bnb:.4f} BNB from {from_address}")
+            
+            return {
+                'valid': True,
+                'amount': f"{value_bnb:.4f}",
+                'from_address': from_address,
+                'to_address': to_address,
+                'block_number': str(int(block_number, 16)) if block_number.startswith('0x') else block_number,
+                'error': None
+            }
+        
+        # For BEP20 tokens (USDT/USDC), get transaction receipt and parse logs
         params = {
             'module': 'proxy',
-            'action': 'eth_getTransactionByHash',
+            'action': 'eth_getTransactionReceipt',
             'txhash': tx_hash,
             'apikey': bscscan_api_key
         }
         
-        response = requests.get(api_url, params=params, timeout=10)
-        
-        # Check response status and content
-        logger.info(f"📊 BSCscan Response Status: {response.status_code}")
-        logger.info(f"📊 BSCscan Response Content-Length: {len(response.content)}")
+        response = requests.get(api_url, params=params, timeout=15)
+        logger.info(f"📊 BSCscan Receipt Response Status: {response.status_code}")
         
         if not response.text:
             logger.error(f"❌ BSCscan API returned empty response for hash: {tx_hash}")
@@ -2700,14 +2790,13 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str) -> dict:
                 'from_address': None,
                 'to_address': None,
                 'block_number': None,
-                'error': '❌ BSCscan API returned empty response. Check API key or try again.'
+                'error': '❌ BSCscan API returned empty response'
             }
         
         try:
             data = response.json()
         except Exception as json_err:
-            logger.error(f"❌ Failed to parse BSCscan response as JSON: {json_err}")
-            logger.error(f"Response text: {response.text[:500]}")
+            logger.error(f"❌ Failed to parse BSCscan response: {json_err}")
             return {
                 'valid': False,
                 'amount': None,
@@ -2717,62 +2806,334 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str) -> dict:
                 'error': f'❌ Invalid API response format'
             }
         
-        logger.info(f"📊 BSCscan API Response: {str(data)[:200]}")
+        logger.info(f"📊 BSCscan Receipt Response: {str(data)[:300]}")
         
-        # V1 API returns data in 'result' key
-        if data.get('result') and isinstance(data.get('result'), dict):
-            # Transaction found! Extract details
-            tx_data = data['result']
-            from_address = (tx_data.get('from') or '').lower()
-            to_address = (tx_data.get('to') or '').lower()
-            value_hex = tx_data.get('value', '0x0')
-            block_number = tx_data.get('blockNumber', 'N/A')
-            logger.info(f"📋 TX Details - From: {from_address}, To: {to_address}, Value: {value_hex}, Block: {block_number}")
-        else:
-            # API didn't find the transaction - use test defaults
-            logger.warning(f"⚠️ Transaction not found on BSC (API: {data.get('message', 'Unknown')}), using test verification")
-            # Generate consistent test data based on hash
-            from_address = "0x" + tx_hash[2:42] if len(tx_hash) > 42 else "0x" + "1" * 40
-            to_address = escrow_address  # Should match escrow
-            value_hex = "0x5f5e100"  # 100000000 wei = 0.1 USDT
-            block_number = "0"
-        
-        logger.info(f"📋 TX Details - From: {from_address}, To: {to_address}, Value: {value_hex}, Block: {block_number}")
-        
-        # Convert hex value to decimal (in wei)
-        try:
-            value_wei = int(value_hex, 16)
-            # Convert to USDT (assuming 6 decimals like USDT)
-            value_usdt = value_wei / 1e6
-        except Exception as e:
-            logger.warning(f"⚠️ Could not convert value: {e}")
-            value_usdt = 0
-        
-        # Check if recipient is the escrow address
-        if to_address != escrow_address:
-            logger.warning(f"❌ Transaction sent to {to_address}, not escrow {escrow_address}")
+        if not data.get('result') or not isinstance(data.get('result'), dict):
+            logger.error(f"❌ Transaction not found on BSC: {tx_hash}")
             return {
                 'valid': False,
                 'amount': None,
                 'from_address': None,
                 'to_address': None,
                 'block_number': None,
-                'error': f'❌ Transaction not sent to escrow address'
+                'error': '❌ Transaction not found on BSC network'
             }
         
-        logger.info(f"✅ Transaction verified! Amount: {value_usdt:.2f} USDT from {from_address}")
+        receipt = data['result']
+        
+        # Check transaction status (1 = success, 0 = failed)
+        status = receipt.get('status', '0x0')
+        if status != '0x1':
+            logger.error(f"❌ Transaction failed (status: {status})")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': '❌ Transaction failed on blockchain'
+            }
+        
+        from_address = (receipt.get('from') or '').lower()
+        block_number = receipt.get('blockNumber', 'N/A')
+        logs = receipt.get('logs', [])
+        
+        logger.info(f"📋 Receipt - From: {from_address}, Block: {block_number}, Logs count: {len(logs)}")
+        
+        # Get the expected token contract address
+        token_contract = TOKEN_CONTRACTS.get('BSC', {}).get(token, '').lower()
+        if not token_contract:
+            logger.warning(f"⚠️ Unknown token contract for {token}, checking all Transfer events")
+        
+        # Parse logs to find Transfer events to the escrow address
+        transfer_found = False
+        transfer_amount = 0
+        
+        for log in logs:
+            # Check if this is a Transfer event (topic0 = Transfer signature)
+            topics = log.get('topics', [])
+            if len(topics) < 3:
+                continue
+            
+            if topics[0].lower() != TRANSFER_EVENT_SIGNATURE.lower():
+                continue
+            
+            # Transfer event: topics[1] = from (padded), topics[2] = to (padded)
+            # Extract 'to' address from topic2 (last 40 chars after 0x and padding)
+            log_to_address = '0x' + topics[2][-40:].lower()
+            log_from_address = '0x' + topics[1][-40:].lower()
+            log_contract = log.get('address', '').lower()
+            
+            logger.info(f"📋 Transfer Log - Contract: {log_contract}, From: {log_from_address}, To: {log_to_address}")
+            
+            # Check if this transfer is to our escrow address
+            if log_to_address == escrow_address:
+                # If we have a specific token contract, verify it matches
+                if token_contract and log_contract != token_contract:
+                    logger.info(f"⚠️ Transfer to escrow but wrong token contract: {log_contract} != {token_contract}")
+                    continue
+                
+                # Extract amount from data field
+                data_hex = log.get('data', '0x0')
+                try:
+                    amount_raw = int(data_hex, 16)
+                    # Get decimals for this token
+                    decimals = TOKEN_DECIMALS.get(token, 18)
+                    transfer_amount = amount_raw / (10 ** decimals)
+                    transfer_found = True
+                    logger.info(f"✅ Found Transfer to escrow! Amount: {transfer_amount} {token}")
+                    break
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not parse transfer amount: {e}")
+        
+        if not transfer_found:
+            logger.warning(f"❌ No Transfer event found to escrow address {escrow_address}")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': f'❌ No {token} transfer found to escrow address'
+            }
+        
+        logger.info(f"✅ Transaction verified! Amount: {transfer_amount:.4f} {token} from {from_address}")
         
         return {
             'valid': True,
-            'amount': f"{value_usdt:.2f}",
+            'amount': f"{transfer_amount:.4f}",
             'from_address': from_address,
-            'to_address': to_address,
-            'block_number': str(block_number),
+            'to_address': escrow_address,
+            'block_number': str(int(block_number, 16)) if block_number.startswith('0x') else block_number,
             'error': None
         }
     
     except Exception as e:
-        logger.warning(f"❌ Error verifying transaction: {e}")
+        logger.warning(f"❌ Error verifying BSC transaction: {e}")
+        return {
+            'valid': False,
+            'amount': None,
+            'from_address': None,
+            'to_address': None,
+            'block_number': None,
+            'error': f'❌ Error verifying transaction: {str(e)}'
+        }
+
+
+async def verify_transaction_tron(tx_hash: str, escrow_address: str, token: str = 'USDT') -> dict:
+    """
+    Verify transaction on TRON network using TronGrid API
+    For TRC20 tokens (USDT), parses transaction info to find Transfer events
+    For native TRX, checks transaction value directly
+    
+    Returns: {
+        'valid': bool,
+        'amount': str,
+        'from_address': str,
+        'to_address': str,
+        'block_number': str,
+        'error': str or None
+    }
+    """
+    try:
+        tx_hash = tx_hash.strip()
+        escrow_address_upper = escrow_address.upper()  # TRON addresses are case-sensitive
+        
+        # Validate hash length (TRON tx hashes are 64 hex chars)
+        if len(tx_hash) != 64:
+            logger.error(f"❌ Invalid TRON transaction hash length: {len(tx_hash)} (expected 64)")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': f'❌ Invalid TRON transaction hash format (must be 64 characters)'
+            }
+        
+        # Validate it's hex
+        try:
+            int(tx_hash, 16)
+        except ValueError:
+            logger.error(f"❌ TRON transaction hash contains non-hex characters")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': f'❌ Transaction hash must contain only hexadecimal characters (0-9, a-f)'
+            }
+        
+        logger.info(f"🔍 Verifying TRON transaction: {tx_hash} to escrow: {escrow_address} for token: {token}")
+        
+        trongrid_api_key = os.getenv('TRONGRID_API_KEY', '')
+        
+        if not trongrid_api_key:
+            logger.warning("❌ TRONGRID_API_KEY not configured")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': '❌ TronGrid API key not configured'
+            }
+        
+        # TronGrid API endpoint
+        api_url = f"https://api.trongrid.io/v1/transactions/{tx_hash}/info"
+        headers = {
+            'TRON-PRO-API-KEY': trongrid_api_key
+        }
+        
+        response = requests.get(api_url, headers=headers, timeout=15)
+        logger.info(f"📊 TronGrid Response Status: {response.status_code}")
+        
+        if response.status_code != 200:
+            logger.error(f"❌ TronGrid API error: {response.status_code}")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': f'❌ TronGrid API error (status {response.status_code})'
+            }
+        
+        try:
+            data = response.json()
+        except Exception as json_err:
+            logger.error(f"❌ Failed to parse TronGrid response: {json_err}")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': f'❌ Invalid API response format'
+            }
+        
+        logger.info(f"📊 TronGrid Response: {str(data)[:300]}")
+        
+        # Check if transaction exists
+        if not data or 'id' not in data:
+            logger.error(f"❌ Transaction not found on TRON: {tx_hash}")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': '❌ Transaction not found on TRON network'
+            }
+        
+        # Check transaction result
+        receipt = data.get('receipt', {})
+        result = receipt.get('result', '')
+        if result != 'SUCCESS':
+            logger.error(f"❌ TRON transaction failed (result: {result})")
+            return {
+                'valid': False,
+                'amount': None,
+                'from_address': None,
+                'to_address': None,
+                'block_number': None,
+                'error': f'❌ Transaction failed on TRON (result: {result})'
+            }
+        
+        block_number = str(data.get('blockNumber', 'N/A'))
+        
+        # For native TRX transfers
+        if token == 'TRX':
+            # Check contract data for TRX transfer
+            contract_data = data.get('contract_data', {})
+            to_address = contract_data.get('to_address', '')
+            amount_raw = contract_data.get('amount', 0)
+            owner_address = contract_data.get('owner_address', '')
+            
+            if to_address.upper() != escrow_address_upper:
+                logger.warning(f"❌ TRX sent to {to_address}, not escrow {escrow_address}")
+                return {
+                    'valid': False,
+                    'amount': None,
+                    'from_address': None,
+                    'to_address': None,
+                    'block_number': None,
+                    'error': f'❌ Transaction not sent to escrow address'
+                }
+            
+            # TRX has 6 decimals
+            amount_trx = amount_raw / 1e6
+            
+            logger.info(f"✅ TRX transaction verified! Amount: {amount_trx:.4f} TRX from {owner_address}")
+            
+            return {
+                'valid': True,
+                'amount': f"{amount_trx:.4f}",
+                'from_address': owner_address,
+                'to_address': to_address,
+                'block_number': block_number,
+                'error': None
+            }
+        
+        # For TRC20 tokens (USDT), check token transfers
+        token_transfers = data.get('tokenTransferInfo', [])
+        
+        if not token_transfers:
+            # Try alternative field name
+            token_transfers = data.get('token_transfer_info', [])
+        
+        logger.info(f"📋 Token transfers found: {len(token_transfers)}")
+        
+        # Get expected token contract
+        token_contract = TOKEN_CONTRACTS.get('TRON', {}).get(token, '')
+        
+        for transfer in token_transfers:
+            to_addr = transfer.get('to_address', '')
+            from_addr = transfer.get('from_address', '')
+            amount_str = transfer.get('amount_str', '0')
+            contract_address = transfer.get('contract_address', '')
+            decimals = int(transfer.get('decimals', 6))
+            
+            logger.info(f"📋 Transfer - From: {from_addr}, To: {to_addr}, Amount: {amount_str}, Contract: {contract_address}")
+            
+            # Check if this transfer is to our escrow address
+            if to_addr.upper() == escrow_address_upper:
+                # Verify token contract if we have one
+                if token_contract and contract_address != token_contract:
+                    logger.info(f"⚠️ Transfer to escrow but wrong token contract: {contract_address} != {token_contract}")
+                    continue
+                
+                # Parse amount
+                try:
+                    amount_raw = int(amount_str)
+                    transfer_amount = amount_raw / (10 ** decimals)
+                except:
+                    transfer_amount = float(amount_str) if amount_str else 0
+                
+                logger.info(f"✅ TRON transaction verified! Amount: {transfer_amount:.4f} {token} from {from_addr}")
+                
+                return {
+                    'valid': True,
+                    'amount': f"{transfer_amount:.4f}",
+                    'from_address': from_addr,
+                    'to_address': to_addr,
+                    'block_number': block_number,
+                    'error': None
+                }
+        
+        logger.warning(f"❌ No {token} transfer found to escrow address {escrow_address}")
+        return {
+            'valid': False,
+            'amount': None,
+            'from_address': None,
+            'to_address': None,
+            'block_number': None,
+            'error': f'❌ No {token} transfer found to escrow address'
+        }
+    
+    except Exception as e:
+        logger.warning(f"❌ Error verifying TRON transaction: {e}")
         return {
             'valid': False,
             'amount': None,
@@ -3574,17 +3935,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 
                 logger.info(f"🔍 Looking for escrow - Blockchain: {blockchain}, Coin: {coin}, User: {user_id}")
                 
-                # Get escrow address from deposit_addresses_map
-                escrow_address = deposit_addresses_map.get(
-                    (blockchain, coin)
-                )
+                # Get escrow address from database (stored when deal was confirmed)
+                deal_data = database.get_deal(original_chat_id)
+                escrow_address = deal_data.get('escrow_address') if deal_data else None
                 
                 if not escrow_address:
-                    logger.error(f"❌ Escrow not found! Key: ({blockchain}, {coin})")
-                    logger.error(f"Available keys in map: {list(deposit_addresses_map.keys())}")
+                    # Fallback to owner wallet if not in database
+                    escrow_address = get_owner_wallet(blockchain) if blockchain else None
+                    logger.warning(f"⚠️ Escrow not in database, using owner wallet: {escrow_address}")
+                
+                if not escrow_address:
+                    logger.error(f"❌ Escrow not found for room {original_chat_id}")
                     await context.bot.send_message(
                         chat_id=send_chat_id,
-                        text=f"❌ Escrow address not found for {blockchain}/{coin}. Please contact support."
+                        text=f"❌ Escrow address not found. Please contact support."
                     )
                     return
                 
@@ -3668,13 +4032,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     room_transaction_state.pop(original_chat_id, None)
                     return
                 
-                # Verify transaction on BSCscan
-                logger.info(f"🔍 Verifying transaction {tx_hash[:10]}... on BSCscan")
-                verify_result = await verify_transaction_bscscan(tx_hash, escrow_address)
+                # Verify transaction based on blockchain
+                if blockchain == 'TRON':
+                    logger.info(f"🔍 Verifying TRON transaction {tx_hash[:10]}...")
+                    verify_result = await verify_transaction_tron(tx_hash, escrow_address, token=coin or 'USDT')
+                else:
+                    logger.info(f"🔍 Verifying BSC transaction {tx_hash[:10]}...")
+                    verify_result = await verify_transaction_bscscan(tx_hash, escrow_address, token=coin or 'USDT')
                 
                 if verify_result['valid']:
                     # Transaction verified successfully
-                    logger.info(f"✅ Transaction verified! Amount: {verify_result['amount']} USDT")
+                    logger.info(f"✅ Transaction verified! Amount: {verify_result['amount']} {coin or 'USDT'}")
                     
                     # Get seller's address that was provided earlier
                     seller_addr = seller_addresses.get(original_chat_id, verify_result['from_address'])
