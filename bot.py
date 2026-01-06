@@ -2116,10 +2116,30 @@ Release has been declined by the seller."""
                 # Remove button and send deal confirmed message
                 reply_markup = None
                 
-                # Get all transaction data for deal confirmed message
-                deal_amount = f"{amount} {coin}"
-                fees = "0.00 USDT"
-                release_amount = f"{amount} {coin}"
+                # Calculate fees and release amount (same as deal summary)
+                amount_float = float(amount) if amount else 0
+                
+                # Get network fee based on chain
+                if chain == 'TRON':
+                    network_fee = 3.0
+                else:  # BSC
+                    network_fee = 0.2
+                
+                # Get service fee from stored fee tier
+                stored_fee_tier = room_fee_tiers.get(chat_id, '0.75%')
+                try:
+                    service_fee_percent = float(stored_fee_tier.replace('%', ''))
+                except (ValueError, AttributeError):
+                    service_fee_percent = 0.75
+                
+                # Calculate service fee amount and release amount
+                service_fee_amount = amount_float * (service_fee_percent / 100)
+                release_amount_value = amount_float - network_fee - service_fee_amount
+                
+                # Format values - use .1f for clean display (203.0 instead of 203.00000000)
+                deal_amount = f"{float(amount):.1f} {coin}" if amount else f"0.0 {coin}"
+                fees = f"{service_fee_percent}%"  # Service fee as percentage (same as deal summary)
+                release_amount = f"{release_amount_value:.1f} {coin}"
                 
                 # Format deal confirmed text with monospace for addresses
                 confirmed_text = f"""✅ <b>DEAL CONFIRMED</b>
@@ -3474,11 +3494,12 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
     # Calculate release amount (amount - network fee - service fee)
     release_amount = amount_float - network_fee - service_fee_amount
     
-    # Format values
+    # Format values - use .1f for clean display (203.0 instead of 203.00000000)
+    amount_formatted = f"{float(amount):.1f}" if amount else "0.0"
     rate_formatted = f"₹{rate:.1f}" if rate else "N/A"
     network_fee_formatted = f"{network_fee} {coin}"
     service_fee_formatted = f"{service_fee_percent}%"
-    release_amount_formatted = f"{release_amount:.2f} {coin}"
+    release_amount_formatted = f"{release_amount:.1f} {coin}"
     
     # Build approval status strings
     buyer_status = f"✅ @{buyer_username} has approved." if buyer_approved else f"⏳ Waiting for @{buyer_username} to approve."
@@ -3486,7 +3507,7 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
     
     deal_text = f"""📋  <b>Deal Summary</b>
 
-• <b>Amount:</b> {amount} {coin}
+• <b>Amount:</b> {amount_formatted} {coin}
 • <b>Rate:</b> {rate_formatted}
 • <b>Payment:</b> {payment_method}
 • <b>Chain:</b> {chain}

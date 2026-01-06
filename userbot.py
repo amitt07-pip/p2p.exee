@@ -43,8 +43,25 @@ DEAL_QUEUE_FILE = "deal_requests.json"
 
 # Store data
 deal_rooms = {}
-room_counter = 5
 client = None
+
+def get_next_room_number():
+    """Get the next room number based on existing rooms in deal_rooms.json"""
+    try:
+        room_info_file = "deal_rooms.json"
+        if os.path.exists(room_info_file):
+            with open(room_info_file, 'r') as f:
+                room_info = json.load(f)
+            if room_info:
+                max_room = max(info.get('room_number', 0) for info in room_info.values())
+                return max(30, max_room + 1)  # Start from at least 30
+        return 30  # Default starting point
+    except Exception as e:
+        logger.warning(f"Could not read room numbers: {e}")
+        return 30
+
+# Initialize room counter from existing rooms
+room_counter = get_next_room_number()
 
 
 async def authenticate_client():
