@@ -3996,7 +3996,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 
                 if verify_result['valid']:
                     # Transaction verified successfully
-                    logger.info(f"✅ Transaction verified! Amount: {verify_result['amount']} {coin or 'USDT'}")
+                    # Use the actual received amount from blockchain, not the deal amount
+                    received_amount = verify_result['amount']
+                    logger.info(f"✅ Transaction verified! Received amount: {received_amount} {coin or 'USDT'}")
                     
                     # Get seller's address that was provided earlier
                     seller_addr = seller_addresses.get(original_chat_id, verify_result['from_address'])
@@ -4004,7 +4006,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     await send_deposit_found_message(
                         context.bot,
                         send_chat_id,
-                        f"{amount:.2f}",
+                        f"{received_amount}",  # Use actual received amount from blockchain
                         seller_addr,
                         verify_result['to_address'],
                         tx_hash,
