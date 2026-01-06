@@ -2077,32 +2077,30 @@ Release has been declined by the seller."""
             # Save approval to database
             database.approve_summary(chat_id, user_role)
             
-            # Get deal data for both summary text and confirmed message
-            amount = None
-            rate = None
-            payment_method = None
-            coin = user_coins.get(chat_id, 'USDT')
-            chain = user_blockchain.get(chat_id, 'BSC')
-            buyer_address = buyer_addresses.get(chat_id, "N/A")
-            seller_address = seller_addresses.get(chat_id, "N/A")
+            # Get deal data from database (source of truth to prevent mixing)
+            deal_data = database.get_deal(chat_id)
             
-            # Get amount from user_amounts
-            for uid, stored_amt in user_amounts.items():
-                if amount is None:
-                    amount = stored_amt
-                    break
+            if deal_data:
+                amount = deal_data.get('amount')
+                rate = deal_data.get('rate')
+                payment_method = deal_data.get('payment_method')
+                coin = deal_data.get('coin') or 'USDT'
+                chain = deal_data.get('network') or 'BSC'
+                buyer_address = deal_data.get('buyer_address') or buyer_addresses.get(chat_id, "N/A")
+                seller_address = deal_data.get('seller_address') or seller_addresses.get(chat_id, "N/A")
+                logger.info(f"📊 Using database values for approval in room {chat_id}")
+            else:
+                # Fallback to in-memory values if database not available
+                amount = None
+                rate = None
+                payment_method = None
+                coin = user_coins.get(chat_id, 'USDT')
+                chain = user_blockchain.get(chat_id, 'BSC')
+                buyer_address = buyer_addresses.get(chat_id, "N/A")
+                seller_address = seller_addresses.get(chat_id, "N/A")
+                logger.warning(f"⚠️ No database record for room {chat_id} in approval handler")
             
-            # Get rate from user_rates
-            for uid, r in user_rates.items():
-                rate = r
-                break
-            
-            # Get payment method
-            for uid, pm in user_payment_methods.items():
-                payment_method = pm
-                break
-            
-            rate_formatted = f"₹{rate:.1f}" if rate else "N/A"
+            rate_formatted = f"₹{float(rate):.1f}" if rate else "N/A"
             
             # Use the shared helper function to build deal text with current approval status
             deal_text = build_deal_summary_text(
@@ -3423,41 +3421,33 @@ async def send_step3_coin_message(bot, send_chat_id: int, chat_id: int) -> None:
 
 def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_approved: bool = False) -> str:
     """Build deal summary text with current formatting - single source of truth"""
-    # Get all transaction data
-    amount = None
-    rate = None
-    payment_method = None
-    coin = None
-    buyer_address = buyer_addresses.get(chat_id, "N/A")
-    seller_address = seller_addresses.get(chat_id, "N/A")
-    buyer_username = room_initiators[chat_id].get('buyer') if chat_id in room_initiators else "Unknown"
-    seller_username = room_initiators[chat_id].get('seller') if chat_id in room_initiators else "Unknown"
+    # Get deal data from database first (source of truth to prevent mixing)
+    deal_data = database.get_deal(chat_id)
     
-    # Find user IDs for buyer and seller from user_roles to get their amounts, rates, etc.
-    if chat_id in user_roles:
-        for username, role in user_roles[chat_id].items():
-            for uid, stored_amt in user_amounts.items():
-                if amount is None:
-                    amount = stored_amt
-                    break
-            if amount is not None:
-                break
-    
-    # Get rate from user_rates (just take the first one for the room)
-    for uid, r in user_rates.items():
-        rate = r
-        break
-    
-    # Get payment method (just take the first one for the room)
-    for uid, pm in user_payment_methods.items():
-        payment_method = pm
-        break
-    
-    # Get coin for this room
-    coin = user_coins.get(chat_id, 'USDT')
-    
-    # Get blockchain for this room
-    chain = user_blockchain.get(chat_id, 'BSC')
+    # Initialize with database values if available
+    if deal_data:
+        amount = deal_data.get('amount')
+        rate = deal_data.get('rate')
+        payment_method = deal_data.get('payment_method')
+        coin = deal_data.get('coin') or 'USDT'
+        chain = deal_data.get('network') or 'BSC'
+        buyer_address = deal_data.get('buyer_address') or buyer_addresses.get(chat_id, "N/A")
+        seller_address = deal_data.get('seller_address') or seller_addresses.get(chat_id, "N/A")
+        buyer_username = deal_data.get('buyer_username') or (room_initiators[chat_id].get('buyer') if chat_id in room_initiators else "Unknown")
+        seller_username = deal_data.get('seller_username') or (room_initiators[chat_id].get('seller') if chat_id in room_initiators else "Unknown")
+        logger.info(f"📊 Using database values for deal summary in room {chat_id}")
+    else:
+        # Fallback to in-memory values if database not available
+        amount = None
+        rate = None
+        payment_method = None
+        coin = user_coins.get(chat_id, 'USDT')
+        chain = user_blockchain.get(chat_id, 'BSC')
+        buyer_address = buyer_addresses.get(chat_id, "N/A")
+        seller_address = seller_addresses.get(chat_id, "N/A")
+        buyer_username = room_initiators[chat_id].get('buyer') if chat_id in room_initiators else "Unknown"
+        seller_username = room_initiators[chat_id].get('seller') if chat_id in room_initiators else "Unknown"
+        logger.warning(f"⚠️ No database record for room {chat_id}, using in-memory fallback")
     
     # Calculate network fee based on chain
     if chain == 'TRON':
