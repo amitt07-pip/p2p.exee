@@ -3711,11 +3711,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         
         # Check if room is waiting for buyer wallet address input
         elif room_transaction_state.get(original_chat_id) == 'step7_buyer_address':
-            # Check if this user is the buyer
+            # Check if this user is the buyer (only buyer can provide their wallet address)
             if original_chat_id in room_initiators:
                 buyer_username = room_initiators[original_chat_id].get('buyer')
-                if buyer_username and user.username.lower() != buyer_username.lower():
-                    await update.message.reply_text("❌ Only the buyer can provide their wallet address")
+                if buyer_username and user.username and user.username.lower() != buyer_username.lower():
+                    # Silently ignore seller's messages during this step
+                    logger.info(f"⏭️ Ignoring message from {user.username} (not buyer) in room {original_chat_id}")
                     return
             
             # Validate wallet address format based on selected blockchain
@@ -3792,11 +3793,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         
         # Check if room is waiting for seller wallet address input
         elif room_transaction_state.get(original_chat_id) == 'step7_seller_address':
-            # Check if this user is the seller
+            # Check if this user is the seller (only seller can provide their wallet address)
             if original_chat_id in room_initiators:
                 seller_username = room_initiators[original_chat_id].get('seller')
-                if seller_username and user.username.lower() != seller_username.lower():
-                    await update.message.reply_text("❌ Only the seller can provide their wallet address")
+                if seller_username and user.username and user.username.lower() != seller_username.lower():
+                    # Silently ignore buyer's messages during this step
+                    logger.info(f"⏭️ Ignoring message from {user.username} (not seller) in room {original_chat_id}")
                     return
             
             # Validate wallet address format based on selected blockchain
