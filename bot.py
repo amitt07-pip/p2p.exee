@@ -2834,8 +2834,10 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str, token: s
             logger.warning(f"⚠️ Unknown token contract for {token}, checking all Transfer events")
         
         # Parse logs to find Transfer events to the escrow address
+        # Sum ALL matching transfers (a single tx can have multiple Transfer events from swaps/routers)
         transfer_found = False
-        transfer_amount = 0
+        total_transfer_amount = 0
+        transfer_count = 0
         
         for log in logs:
             # Check if this is a Transfer event (topic0 = Transfer signature)
@@ -2856,7 +2858,7 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str, token: s
             
             # Check if this transfer is to our escrow address
             if log_to_address == escrow_address:
-                # If we have a specific token contract, verify it matches
+                # If we have a specific token contract, REQUIRE it to match (don't accept other tokens)
                 if token_contract and log_contract != token_contract:
                     logger.info(f"⚠️ Transfer to escrow but wrong token contract: {log_contract} != {token_contract}")
                     continue
@@ -2867,12 +2869,16 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str, token: s
                     amount_raw = int(data_hex, 16)
                     # Get decimals for this token
                     decimals = TOKEN_DECIMALS.get(token, 18)
-                    transfer_amount = amount_raw / (10 ** decimals)
+                    single_transfer_amount = amount_raw / (10 ** decimals)
+                    total_transfer_amount += single_transfer_amount
+                    transfer_count += 1
                     transfer_found = True
-                    logger.info(f"✅ Found Transfer to escrow! Amount: {transfer_amount} {token}")
-                    break
+                    logger.info(f"✅ Found Transfer #{transfer_count} to escrow! Amount: {single_transfer_amount} {token}")
                 except Exception as e:
                     logger.warning(f"⚠️ Could not parse transfer amount: {e}")
+        
+        if transfer_count > 1:
+            logger.info(f"📊 Total from {transfer_count} transfers: {total_transfer_amount} {token}")
         
         if not transfer_found:
             logger.warning(f"❌ No Transfer event found to escrow address {escrow_address}")
@@ -2885,11 +2891,11 @@ async def verify_transaction_bscscan(tx_hash: str, escrow_address: str, token: s
                 'error': f'❌ No {token} transfer found to escrow address'
             }
         
-        logger.info(f"✅ Transaction verified! Amount: {transfer_amount:.4f} {token} from {from_address}")
+        logger.info(f"✅ Transaction verified! Total amount: {total_transfer_amount:.4f} {token} from {from_address}")
         
         return {
             'valid': True,
-            'amount': f"{transfer_amount:.4f}",
+            'amount': f"{total_transfer_amount:.4f}",
             'from_address': from_address,
             'to_address': escrow_address,
             'block_number': str(int(block_number, 16)) if block_number.startswith('0x') else block_number,
