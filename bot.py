@@ -731,9 +731,8 @@ async def setownerwallet_command(update: Update, context: ContextTypes.DEFAULT_T
     """Handle /setownerwallet command - admin only"""
     user = update.effective_user
     
-    # Check if user is admin
+    # Silently ignore unauthorized users
     if user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
         return
     
     # Parse the command to extract new wallet address
@@ -799,9 +798,8 @@ async def setceowallet_command(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle /setceowallet command - admin only"""
     user = update.effective_user
     
-    # Check if user is admin
+    # Silently ignore unauthorized users
     if user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
         return
     
     # Parse the command to extract new wallet address
@@ -867,9 +865,8 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle /wallets command - admin only, shows all active deposit wallets"""
     user = update.effective_user
     
-    # Check if user is admin
+    # Silently ignore unauthorized users
     if user.id not in ADMIN_USER_IDS:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
         return
     
     # Get all wallet addresses
@@ -894,9 +891,8 @@ async def kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle /kick command - works in all bot-created MM ROOM groups"""
     user = update.effective_user
     
-    # Check if user is authorized to use this command
+    # Silently ignore unauthorized users
     if user.id not in AUTHORIZED_KICK_USERS:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
         return
     
     # Check if command is from a group
@@ -982,9 +978,8 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """Handle /link command - only for user 7338429782"""
     user = update.effective_user
     
-    # Check if user is authorized
+    # Silently ignore unauthorized users
     if user.id != 7338429782:
-        await update.message.reply_text("❌ You are not authorized to use this command.")
         return
     
     # Parse chat_id from command
@@ -1027,15 +1022,9 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /restart command - only for user 7300655160"""
+    """Handle /restart command - available for everyone in deal rooms"""
     user = update.effective_user
-    logger.info(f"🔄 /restart command attempt by user {user.id} (authorized: {user.id == 7300655160})")
-    
-    # Check if user is authorized
-    if user.id != 7300655160:
-        logger.info(f"❌ Unauthorized restart attempt by {user.id}")
-        await update.message.reply_text("❌ You are not authorized to use this command.")
-        return
+    logger.info(f"🔄 /restart command by user {user.id}")
     
     # Check if command is from a group
     if update.effective_chat.type not in ['group', 'supergroup']:
