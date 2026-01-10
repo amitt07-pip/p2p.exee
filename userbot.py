@@ -46,7 +46,8 @@ deal_rooms = {}
 client = None
 
 def get_next_room_number():
-    """Get the next room number based on existing rooms in deal_rooms.json"""
+    """Get the next room number - cycles from 40 to 90, then restarts from 40"""
+    global room_counter
     try:
         room_info_file = "deal_rooms.json"
         if os.path.exists(room_info_file):
@@ -54,11 +55,18 @@ def get_next_room_number():
                 room_info = json.load(f)
             if room_info:
                 max_room = max(info.get('room_number', 0) for info in room_info.values())
-                return max(30, max_room + 1)  # Start from at least 30
-        return 30  # Default starting point
+                next_room = max_room + 1
+                # Cycle: if next_room > 90, restart from 40
+                if next_room > 90:
+                    next_room = 40
+                # Ensure minimum is 40
+                if next_room < 40:
+                    next_room = 40
+                return next_room
+        return 40  # Default starting point
     except Exception as e:
         logger.warning(f"Could not read room numbers: {e}")
-        return 30
+        return 40
 
 # Initialize room counter from existing rooms
 room_counter = get_next_room_number()
