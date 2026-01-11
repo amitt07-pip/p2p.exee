@@ -102,6 +102,8 @@ transactions = {}
 # Deal request queue file
 DEAL_QUEUE_FILE = "deal_requests.json"
 DEAL_ROOMS_FILE = "deal_rooms.json"
+# Group deletion queue file
+DELETE_QUEUE_FILE = "delete_requests.json"
 
 # Authorized user IDs for /kick command
 AUTHORIZED_KICK_USERS = {
@@ -502,6 +504,30 @@ def write_deal_request(initiator_id, initiator_username, counterparty_username, 
         return True
     except Exception as e:
         logger.error(f"❌ Error: {e}")
+        return False
+
+
+def write_delete_request(chat_id, room_name):
+    """Write a group deletion request to the queue for userbot to process"""
+    try:
+        requests = []
+        if os.path.exists(DELETE_QUEUE_FILE):
+            with open(DELETE_QUEUE_FILE, 'r') as f:
+                requests = json.load(f)
+        
+        requests.append({
+            'chat_id': chat_id,
+            'room_name': room_name,
+            'status': 'pending'
+        })
+        
+        with open(DELETE_QUEUE_FILE, 'w') as f:
+            json.dump(requests, f, indent=2)
+        
+        logger.info(f"📝 Wrote deletion request for {room_name} (chat_id: {chat_id})")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error writing delete request: {e}")
         return False
 
 
@@ -4742,6 +4768,10 @@ If you need to continue this transaction, please start a new deal using /deal co
                         del approvals[chat_id]
                     if chat_id in release_approvals:
                         del release_approvals[chat_id]
+                    
+                    # Request userbot to delete the group
+                    write_delete_request(chat_id, room_name)
+                    logger.info(f"🗑️ Requested deletion of group {room_name} (chat_id: {chat_id})")
                     
                 except Exception as e:
                     logger.warning(f"Error auto-closing deal {chat_id}: {e}")

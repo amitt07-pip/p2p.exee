@@ -10,7 +10,7 @@ import json
 import asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient
-from telethon.tl.functions.channels import CreateChannelRequest, EditPhotoRequest, InviteToChannelRequest, EditAdminRequest
+from telethon.tl.functions.channels import CreateChannelRequest, EditPhotoRequest, InviteToChannelRequest, EditAdminRequest, DeleteChannelRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import ChatAdminRights, InputChatPhoto, InputPhoto
@@ -40,6 +40,8 @@ PHONE_NUMBER = os.getenv('TELEGRAM_PHONE', '')
 
 # Deal request queue file
 DEAL_QUEUE_FILE = "deal_requests.json"
+# Group deletion queue file
+DELETE_QUEUE_FILE = "delete_requests.json"
 
 # Store data
 deal_rooms = {}
@@ -131,6 +133,71 @@ def update_request_status(initiator_username, counterparty_username, status, res
             json.dump(requests, f, indent=2)
     except Exception as e:
         logger.error(f"Error updating request status: {e}")
+
+
+def read_delete_requests():
+    """Read pending group deletion requests from queue"""
+    try:
+        if os.path.exists(DELETE_QUEUE_FILE):
+            with open(DELETE_QUEUE_FILE, 'r') as f:
+                requests = json.load(f)
+                return [r for r in requests if r.get('status') == 'pending']
+    except Exception as e:
+        logger.error(f"Error reading delete requests: {e}")
+    return []
+
+
+def update_delete_request_status(chat_id, status):
+    """Update the status of a deletion request"""
+    try:
+        requests = []
+        if os.path.exists(DELETE_QUEUE_FILE):
+            with open(DELETE_QUEUE_FILE, 'r') as f:
+                requests = json.load(f)
+        
+        for req in requests:
+            if req.get('chat_id') == chat_id:
+                req['status'] = status
+        
+        with open(DELETE_QUEUE_FILE, 'w') as f:
+            json.dump(requests, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error updating delete request status: {e}")
+
+
+async def delete_group(client, chat_id):
+    """Delete a group/channel by chat_id"""
+    try:
+        # Convert to the format Telethon expects
+        if chat_id < 0:
+            # Already negative, might need to convert
+            entity_id = abs(chat_id)
+            if entity_id > 1000000000000:
+                entity_id = entity_id - 1000000000000
+        else:
+            entity_id = chat_id
+        
+        logger.info(f"🗑️ Attempting to delete group with ID: {entity_id}")
+        
+        # Get the channel entity
+        try:
+            entity = await client.get_entity(entity_id)
+            await client(DeleteChannelRequest(channel=entity))
+            logger.info(f"✅ Successfully deleted group {entity_id}")
+            return True
+        except Exception as e:
+            # Try with negative format
+            try:
+                entity = await client.get_entity(-entity_id)
+                await client(DeleteChannelRequest(channel=entity))
+                logger.info(f"✅ Successfully deleted group {entity_id}")
+                return True
+            except Exception as e2:
+                logger.error(f"❌ Failed to delete group {entity_id}: {e2}")
+                return False
+    except Exception as e:
+        logger.error(f"❌ Error deleting group {chat_id}: {e}")
+        return False
 
 
 async def fetch_and_store_user_bio(client, username: str) -> bool:
@@ -427,9 +494,10 @@ ALL COMMANDS ARE CASE-SENSITIVE
 
 
 async def process_deal_requests(client):
-    """Continuously process deal requests from the queue - ONLY CREATES GROUPS"""
+    """Continuously process deal requests and deletion requests from the queues"""
     while True:
         try:
+            # Process deal creation requests
             requests = read_deal_requests()
             if requests:
                 for req in requests:
@@ -459,6 +527,24 @@ async def process_deal_requests(client):
                             counterparty_username,
                             'failed'
                         )
+            
+            # Process group deletion requests
+            delete_requests = read_delete_requests()
+            if delete_requests:
+                for req in delete_requests:
+                    chat_id = req.get('chat_id')
+                    room_name = req.get('room_name', 'Unknown')
+                    
+                    logger.info(f"🗑️ Processing deletion request for {room_name} (chat_id: {chat_id})")
+                    
+                    success = await delete_group(client, chat_id)
+                    
+                    if success:
+                        update_delete_request_status(chat_id, 'completed')
+                        logger.info(f"✅ Deleted group {room_name}")
+                    else:
+                        update_delete_request_status(chat_id, 'failed')
+                        logger.warning(f"❌ Failed to delete group {room_name}")
             
             await asyncio.sleep(2)
         except Exception as e:
