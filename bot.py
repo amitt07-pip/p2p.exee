@@ -1476,7 +1476,12 @@ async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.warning(f"Could not delete /verify command message: {e}")
     
     if not context.args or len(context.args) == 0:
-        await update.effective_chat.send_message("❌ Usage: /verify <escrow_address>")
+        usage_text = """❌ Usage: /verify <address>
+
+Examples:
+• /verify 0x4dd9c84aD4201d4aDF67eE20508BF622125C515c (EVM)
+• /verify TQn9Y2khEsLMWT4K3LdL8oKbh1Z2HtZqjP (TRON)"""
+        await update.effective_chat.send_message(usage_text)
         return
     
     address_to_verify = context.args[0].strip().lower()
