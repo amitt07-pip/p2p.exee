@@ -168,6 +168,7 @@ valid_payment_methods = {"UPI", "CDM", "CCW", "CASH", "ATM", "CARDLESS", "IMPS",
 payment_confirmations = {}  # Track payment confirmations: {chat_id: {'sent': bool, 'hash': str or None}}
 room_awaiting_hash = {}  # Track which rooms are awaiting transaction hash: {chat_id: 'awaiting_hash'}
 room_creation_times = {}  # Track when each room was created for time calculation: {chat_id: timestamp}
+room_confirmed_deposits = {}  # Track confirmed deposits: {chat_id: amount}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
 
 # Admin user IDs who can use admin commands like /setownerwallet
@@ -1412,6 +1413,110 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode='HTML',
         reply_markup=reply_markup
     )
+
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /balance command - available for everyone after deposit address is sent"""
+    user = update.effective_user
+    logger.info(f"💰 /balance command by user {user.id}")
+    
+    # Check if command is from a group
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        logger.info(f"❌ Balance command not in group - chat type: {update.effective_chat.type}")
+        await update.message.reply_text("❌ This command can only be used inside a group.")
+        return
+    
+    chat_id = update.effective_chat.id
+    
+    # Normalize chat_id
+    original_chat_id = normalize_chat_id(chat_id)
+    
+    # Check if deposit address has been sent (command only works after deposit address)
+    if original_chat_id not in deposit_address_messages:
+        logger.info(f"❌ Balance command before deposit address in room {original_chat_id}")
+        # Silently ignore - don't respond before deposit address is sent
+        return
+    
+    # Get the amount, token, and network for this room
+    # Balance is 0 until deposit is confirmed
+    amount = room_confirmed_deposits.get(original_chat_id, 0)
+    
+    # Get token (coin) for this room
+    token = user_coins.get(original_chat_id, "N/A")
+    
+    # Get network (blockchain) for this room
+    network = user_blockchain.get(original_chat_id, "N/A")
+    
+    # Format the amount (always show 5 decimal places)
+    amount_formatted = f"{amount:.5f}"
+    
+    # Build the balance message
+    balance_text = f"""💰 <b>Available Balance</b>
+
+<b>Amount:</b> {amount_formatted} {token}
+<b>Token:</b> {token}
+<b>Network:</b> {network}
+
+This is the current available balance for this trade."""
+    
+    await update.message.reply_text(balance_text, parse_mode='HTML')
+    logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token} on {network}")
+
+
+async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /verify command - verify escrow address for all users"""
+    user = update.effective_user
+    logger.info(f"🔍 /verify command by user {user.id}")
+    
+    # Delete the command message
+    try:
+        await update.message.delete()
+        logger.info(f"🗑️ Deleted /verify command message from user {user.id}")
+    except Exception as e:
+        logger.warning(f"Could not delete /verify command message: {e}")
+    
+    if not context.args or len(context.args) == 0:
+        await update.effective_chat.send_message("❌ Usage: /verify <escrow_address>")
+        return
+    
+    address_to_verify = context.args[0].strip().lower()
+    
+    # Build escrow addresses from owner and CEO wallets
+    escrow_addresses = {}
+    
+    # Add owner wallets
+    owner_bsc = get_owner_wallet('BSC')
+    owner_tron = get_owner_wallet('TRON')
+    if owner_bsc:
+        escrow_addresses[owner_bsc.lower()] = {"token": "USDT/USDC", "chain": "BSC", "type": "Owner"}
+    if owner_tron and owner_tron != "T0000000000000000000000000000000000":
+        escrow_addresses[owner_tron.lower()] = {"token": "USDT", "chain": "TRON", "type": "Owner"}
+    
+    # Add CEO wallets
+    ceo_bsc = get_ceo_wallet('BSC')
+    ceo_tron = get_ceo_wallet('TRON')
+    if ceo_bsc:
+        escrow_addresses[ceo_bsc.lower()] = {"token": "USDT/USDC", "chain": "BSC", "type": "CEO"}
+    if ceo_tron and ceo_tron != "T0000000000000000000000000000000000":
+        escrow_addresses[ceo_tron.lower()] = {"token": "USDT", "chain": "TRON", "type": "CEO"}
+    
+    if address_to_verify in escrow_addresses:
+        info = escrow_addresses[address_to_verify]
+        verified_text = f"""✅ Address <b>verified</b>
+
+Token: {info['token']}
+Chain: {info['chain']}
+Wallet Type: {info['type']}"""
+        await update.effective_chat.send_message(verified_text, parse_mode='HTML')
+        logger.info(f"✅ Address verified for user {user.id}: {address_to_verify} ({info['token']} on {info['chain']})")
+    else:
+        warning_text = """⚠️ <b>WARNING:</b> Address Not Verified
+
+❌ This address does <b>NOT</b> belong to this bot.
+
+<b>🚫 DO NOT send funds to this address!</b>"""
+        await update.effective_chat.send_message(warning_text, parse_mode='HTML')
+        logger.warning(f"⚠️ Address NOT verified for user {user.id}: {address_to_verify}")
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4039,6 +4144,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     received_amount = verify_result['amount']
                     logger.info(f"✅ Transaction verified! Received amount: {received_amount} {coin or 'USDT'}")
                     
+                    # Track confirmed deposit for /balance command
+                    room_confirmed_deposits[original_chat_id] = received_amount
+                    logger.info(f"💰 Confirmed deposit tracked for room {original_chat_id}: {received_amount}")
+                    
                     # Get seller's address that was provided earlier
                     seller_addr = seller_addresses.get(original_chat_id, verify_result['from_address'])
                     
@@ -4821,6 +4930,8 @@ def main() -> None:
     application.add_handler(CommandHandler("setownerwallet", setownerwallet_command))
     application.add_handler(CommandHandler("setceowallet", setceowallet_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
+    application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("verify", verify_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
