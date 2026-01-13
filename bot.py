@@ -1109,13 +1109,31 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         logger.info(f"🔄 Starting complete restart of room {room_name} (chat_id: {chat_id}, original: {original_chat_id})...")
         
-        # Remove from tracking sets
+        # Remove from tracking sets (but keep processed_rooms to prevent background task from sending waiting messages)
         disclaimer_sent.discard(original_chat_id)
         role_selection_sent.discard(original_chat_id)
-        processed_rooms.discard(chat_id)
-        processed_rooms.discard(original_chat_id)
+        # NOTE: Do NOT discard from processed_rooms - this prevents the background task from sending
+        # "Waiting for @initiator to join..." messages which shouldn't happen on restart
         rooms_waiting_for_requests.discard(chat_id)
         rooms_waiting_for_requests.discard(original_chat_id)
+        
+        # Clear step tracking sets/dicts to allow steps to be sent again
+        step1_messages_sent.discard(original_chat_id)
+        step4_amount_messages_sent.discard(original_chat_id)
+        if original_chat_id in step2_blockchain_messages:
+            del step2_blockchain_messages[original_chat_id]
+        if original_chat_id in step3_coin_messages:
+            del step3_coin_messages[original_chat_id]
+        if original_chat_id in step4_messages:
+            del step4_messages[original_chat_id]
+        if original_chat_id in step5_messages:
+            del step5_messages[original_chat_id]
+        if original_chat_id in buyer_wallet_messages:
+            del buyer_wallet_messages[original_chat_id]
+        if original_chat_id in deal_summary_messages:
+            del deal_summary_messages[original_chat_id]
+        if original_chat_id in release_messages:
+            del release_messages[original_chat_id]
         
         # Get initiator and counterparty usernames from deal_rooms.json (they never change)
         initiator_username = None
