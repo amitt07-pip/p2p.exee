@@ -1447,20 +1447,46 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Get network (blockchain) for this room
     network = user_blockchain.get(original_chat_id, "N/A")
     
-    # Format the amount (always show 5 decimal places)
-    amount_formatted = f"{amount:.5f}"
+    # Calculate fees and release amount (same logic as deal summary)
+    # Network fee: 3.0 for TRON, 0.2 for BSC
+    if network == 'TRON':
+        network_fee = 3.0
+    else:
+        network_fee = 0.2
+    
+    # Service fee: Get from room_fee_tiers or default to 0.75%
+    stored_fee_tier = room_fee_tiers.get(original_chat_id, '0.75%')
+    try:
+        service_fee_percent = float(stored_fee_tier.replace('%', ''))
+    except:
+        service_fee_percent = 0.75
+    
+    # Calculate service fee amount and release amount
+    service_fee_amount = amount * (service_fee_percent / 100)
+    release_amount = amount - network_fee - service_fee_amount
+    
+    # Ensure release amount is not negative
+    if release_amount < 0:
+        release_amount = 0
+    
+    # Format amounts
+    amount_formatted = f"{amount:.1f}"
+    network_fee_formatted = f"{network_fee:.1f}"
+    service_fee_formatted = f"{service_fee_percent}%"
+    release_amount_formatted = f"{release_amount:.1f}"
     
     # Build the balance message
     balance_text = f"""💰 <b>Available Balance</b>
 
-<b>Amount:</b> {amount_formatted} {token}
-<b>Token:</b> {token}
-<b>Network:</b> {network}
+<b>Deal Amount:</b> {amount_formatted} {token}
+<b>Network Fee:</b> {network_fee_formatted} {token}
+<b>Service Fee:</b> {service_fee_formatted}
+<b>Release Amount:</b> {release_amount_formatted} {token}
 
-This is the current available balance for this trade."""
+<b>Network:</b> {network}"""
     
     await update.message.reply_text(balance_text, parse_mode='HTML')
-    logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token} on {network}")
+    logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token}, release: {release_amount_formatted} {token}")
 
 
 async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
