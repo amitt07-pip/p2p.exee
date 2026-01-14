@@ -1472,18 +1472,18 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Format amounts
     amount_formatted = f"{amount:.1f}"
     network_fee_formatted = f"{network_fee:.1f}"
-    service_fee_formatted = f"{service_fee_percent}%"
     release_amount_formatted = f"{release_amount:.1f}"
     
-    # Build the balance message
-    balance_text = f"""💰 <b>Available Balance</b>
+    # Build the balance message with new format
+    balance_text = f"""💰 <b>Balance Information</b>
 
-<b>Deal Amount:</b> {amount_formatted} {token}
-<b>Network Fee:</b> {network_fee_formatted} {token}
-<b>Service Fee:</b> {service_fee_formatted}
-<b>Release Amount:</b> {release_amount_formatted} {token}
+<b>Gross Amount:</b> {amount_formatted} {token}
+Net Release Amount: {release_amount_formatted} {token} (After Fees)
+<b>Token:</b> {token}
+<b>Network:</b> {network}
+<b>Fees:</b> {service_fee_percent}% + {network_fee_formatted} {token}
 
-<b>Network:</b> {network}"""
+This is the current available balance for this trade."""
     
     await update.message.reply_text(balance_text, parse_mode='HTML')
     logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token}, release: {release_amount_formatted} {token}")
