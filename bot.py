@@ -4083,21 +4083,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 
                 logger.info(f"✅ Found escrow: {escrow_address}")
                 
-                # Get the amount (take first available for the room)
+                # Get the amount from database for this specific room (not from global dict)
                 amount = None
-                for uid, amt in user_amounts.items():
-                    amount = amt
-                    break
+                if deal_data and deal_data.get('amount'):
+                    amount = float(deal_data['amount'])
+                    logger.info(f"✅ Found amount from database: {amount}")
                 
                 if not amount:
-                    logger.error(f"❌ Amount not found in user_amounts: {user_amounts}")
+                    logger.error(f"❌ Amount not found in database for room {original_chat_id}")
                     await context.bot.send_message(
                         chat_id=send_chat_id,
                         text="❌ Amount not found"
                     )
                     return
-                
-                logger.info(f"✅ Found amount: {amount}")
                 
                 # Check if this is the master hash (skip verification)
                 if tx_hash.lower() == master_hash.lower():
@@ -4140,6 +4138,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     
                     # Record deposit in database
                     database.record_deposit(original_chat_id, tx_hash)
+                    
+                    # Track confirmed deposit for /balance command (use deal amount for master hash)
+                    room_confirmed_deposits[original_chat_id] = amount
+                    logger.info(f"💰 Confirmed deposit tracked for room {original_chat_id}: {amount}")
                     
                     # Send payment received message
                     payment_received_text = (
