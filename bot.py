@@ -482,7 +482,7 @@ def mark_existing_rooms_processed():
         logger.warning(f"Error marking existing rooms: {e}")
 
 
-def write_deal_request(initiator_id, initiator_username, counterparty_username, initiator_chat_id):
+def write_deal_request(initiator_id, initiator_username, counterparty_username, initiator_chat_id, counterparty_user_id=None):
     """Write a deal request to the queue for userbot to process"""
     try:
         requests = []
@@ -490,14 +490,20 @@ def write_deal_request(initiator_id, initiator_username, counterparty_username, 
             with open(DEAL_QUEUE_FILE, 'r') as f:
                 requests = json.load(f)
         
-        requests.append({
+        request_data = {
             'initiator_id': initiator_id,
             'initiator_username': initiator_username,
             'initiator_chat_id': initiator_chat_id,
             'counterparty_username': counterparty_username,
             'status': 'pending',
             'bot_token': os.getenv('TELEGRAM_BOT_TOKEN', '')
-        })
+        }
+        
+        # Add counterparty_user_id if provided (when user has no username)
+        if counterparty_user_id:
+            request_data['counterparty_user_id'] = counterparty_user_id
+        
+        requests.append(request_data)
         
         with open(DEAL_QUEUE_FILE, 'w') as f:
             json.dump(requests, f, indent=2)
@@ -554,6 +560,7 @@ async def check_and_send_deal_results(application, initiator_username):
                     
                     if chat_id:
                         counterparty_username = req.get('counterparty_username')
+                        counterparty_user_id = req.get('counterparty_user_id')
                         initiator_chat_id = req.get('initiator_chat_id')
                         
                         # Only send to GROUP chats (negative IDs), not DMs (positive IDs)
@@ -569,13 +576,19 @@ async def check_and_send_deal_results(application, initiator_username):
                                 room_fee_tiers[chat_id] = fee_tier
                                 logger.info(f"💰 Stored fee tier {fee_tier} for room {chat_id}")
                             
+                            # Format counterparty display - use hyperlink for user ID, @username otherwise
+                            if counterparty_user_id:
+                                counterparty_display = f"<a href=\"tg://user?id={counterparty_user_id}\">User {counterparty_user_id}</a>"
+                            else:
+                                counterparty_display = f"@{counterparty_username}"
+                            
                             # Send message with photo to the GROUP where deal was initiated
                             msg_text = (
                                 f"<b>🏠 Deal Room Created!</b>\n\n"
                                 f"🔗 Join Link: {link_to_send}\n\n"
                                 f"<b>👥 Participants:</b>\n"
                                 f"• @{initiator_username} (Initiator)\n"
-                                f"• @{counterparty_username} (Counterparty)\n\n"
+                                f"• {counterparty_display} (Counterparty)\n\n"
                                 f"💰 <b>Fee Tier:</b> {fee_tier}\n\n"
                                 f"Note: Only the mentioned members can join. Never join any link shared via DM."
                             )
@@ -703,7 +716,7 @@ Only the seller needs to approve to release payment."""
 
 
 async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /deal @username command"""
+    """Handle /deal @username or /deal [user_id] command"""
     # Check if command is from a group
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("❌ This command can only be used inside a group.")
@@ -712,23 +725,36 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user = update.effective_user
     message_text = update.message.text
     
-    # Parse the command to extract counterparty username
-    match = re.search(r'/deal\s+@(\w+)', message_text)
+    # Parse the command to extract counterparty username or user ID
     counterparty_username = None
+    counterparty_user_id = None
     
     # First try: check if mentioned with @username
-    if match:
-        counterparty_username = match.group(1)
-    # Second try: check if replying to someone's message
-    elif update.message.reply_to_message:
-        replied_user = update.message.reply_to_message.from_user
-        if replied_user and replied_user.username:
-            counterparty_username = replied_user.username
+    username_match = re.search(r'/deal\s+@(\w+)', message_text)
+    if username_match:
+        counterparty_username = username_match.group(1)
+    else:
+        # Second try: check if user ID is provided (numeric)
+        userid_match = re.search(r'/deal\s+(\d+)', message_text)
+        if userid_match:
+            counterparty_user_id = int(userid_match.group(1))
+        # Third try: check if replying to someone's message
+        elif update.message.reply_to_message:
+            replied_user = update.message.reply_to_message.from_user
+            if replied_user:
+                if replied_user.username:
+                    counterparty_username = replied_user.username
+                else:
+                    # User has no username, use their ID
+                    counterparty_user_id = replied_user.id
     
     # If no counterparty found, show error
-    if not counterparty_username:
+    if not counterparty_username and not counterparty_user_id:
         await update.message.reply_text(
-            "❌ Please mention the counterparty (tap their name to tag) or reply to their message when using /deal so we can verify their user ID."
+            "❌ Please mention the counterparty (tap their name to tag), provide their user ID, or reply to their message when using /deal.\n\n"
+            "Usage:\n"
+            "/deal @username\n"
+            "/deal 123456789"
         )
         return
     
@@ -741,8 +767,11 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         pass
     
     # Queue the deal request for userbot to process
-    if write_deal_request(user.id, user.username or user.first_name, counterparty_username, initiator_chat_id):
-        logger.info(f"📋 /deal command: {user.username or user.first_name} -> @{counterparty_username}")
+    if write_deal_request(user.id, user.username or user.first_name, counterparty_username, initiator_chat_id, counterparty_user_id):
+        if counterparty_username:
+            logger.info(f"📋 /deal command: {user.username or user.first_name} -> @{counterparty_username}")
+        else:
+            logger.info(f"📋 /deal command: {user.username or user.first_name} -> User {counterparty_user_id}")
         
         # Start polling for results (silently, no initial message)
         for _ in range(60):  # Check for 30 seconds with faster polling
@@ -4388,23 +4417,39 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
             
             initiator_username = room_info.get('initiator_username', '')
             counterparty_username = room_info.get('counterparty_username', '')
+            counterparty_user_id = room_info.get('counterparty_user_id')
             room_name = room_info.get('room_name', '')
             
             logger.info(f"🔎 Checking join request for SPECIFIC ROOM: {room_name}")
-            logger.info(f"   This room's authorized users: Initiator: @{initiator_username}, Counterparty: @{counterparty_username}")
-            logger.info(f"   Requesting user: @{username}")
+            if counterparty_user_id:
+                logger.info(f"   This room's authorized users: Initiator: @{initiator_username}, Counterparty: User {counterparty_user_id}")
+            else:
+                logger.info(f"   This room's authorized users: Initiator: @{initiator_username}, Counterparty: @{counterparty_username}")
+            logger.info(f"   Requesting user: @{username} (ID: {user_id})")
             
             # Only approve if user is the initiator OR counterparty FOR THIS SPECIFIC ROOM
-            # Case-insensitive comparison
-            is_room_initiator = (username.lower() == initiator_username.lower())
-            is_room_counterparty = (username.lower() == counterparty_username.lower())
+            # Check by username (case-insensitive) or by user ID
+            is_room_initiator = False
+            is_room_counterparty = False
+            
+            if username and initiator_username:
+                is_room_initiator = (username.lower() == initiator_username.lower())
+            
+            # Check counterparty by user ID first, then by username
+            if counterparty_user_id:
+                is_room_counterparty = (user_id == counterparty_user_id)
+            elif username and counterparty_username:
+                is_room_counterparty = (username.lower() == counterparty_username.lower())
             
             if is_room_initiator:
                 logger.info(f"✅ @{username} is the INITIATOR for THIS room: {room_name}")
             elif is_room_counterparty:
-                logger.info(f"✅ @{username} is the COUNTERPARTY for THIS room: {room_name}")
+                if counterparty_user_id:
+                    logger.info(f"✅ User {user_id} is the COUNTERPARTY for THIS room: {room_name}")
+                else:
+                    logger.info(f"✅ @{username} is the COUNTERPARTY for THIS room: {room_name}")
             else:
-                logger.warning(f"❌ @{username} is NOT authorized for THIS room: {room_name} (not initiator or counterparty)")
+                logger.warning(f"❌ @{username} (ID: {user_id}) is NOT authorized for THIS room: {room_name} (not initiator or counterparty)")
             
             # Only approve if user is initiator or counterparty FOR THIS SPECIFIC ROOM
             if is_room_initiator or is_room_counterparty:

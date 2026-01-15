@@ -225,7 +225,34 @@ async def fetch_and_store_user_bio(client, username: str) -> bool:
         return False
 
 
-async def create_deal_room(client, initiator_username, counterparty_username, bot_token):
+async def fetch_and_store_user_bio_by_id(client, user_id: int) -> bool:
+    """Fetch a user's bio using Telethon by user ID and store the @room flag in database.
+    Returns True if user has @room in bio, False otherwise."""
+    try:
+        # Get user entity by user ID
+        entity = await client.get_entity(user_id)
+        
+        # Get full user info including bio
+        full_user = await client(GetFullUserRequest(entity.id))
+        bio = full_user.full_user.about or ""
+        
+        # Check if bio contains @room
+        has_room = "@room" in bio.lower()
+        
+        # Get username if available
+        username = entity.username or f"user_{user_id}"
+        
+        # Store in database
+        database.upsert_user_bio_flag(entity.id, username, has_room)
+        
+        logger.info(f"📋 Bio check for User {user_id} (username: @{username}): has_room={has_room}")
+        return has_room
+    except Exception as e:
+        logger.warning(f"Could not fetch bio for User {user_id}: {e}")
+        return False
+
+
+async def create_deal_room(client, initiator_username, counterparty_username, bot_token, counterparty_user_id=None):
     """Create a deal room - NO MESSAGES SENT, ONLY GROUP CREATION"""
     global room_counter
     
@@ -260,9 +287,16 @@ ALL COMMANDS ARE CASE-SENSITIVE
         logger.info(f"✅ Group Created: {room_name} (ID: {chat_id})")
         
         # Fetch and store user bios for service fee calculation
-        logger.info(f"📋 Fetching bios for @{initiator_username} and @{counterparty_username}")
+        if counterparty_user_id:
+            logger.info(f"📋 Fetching bios for @{initiator_username} and User {counterparty_user_id}")
+        else:
+            logger.info(f"📋 Fetching bios for @{initiator_username} and @{counterparty_username}")
         initiator_has_room = await fetch_and_store_user_bio(client, initiator_username)
-        counterparty_has_room = await fetch_and_store_user_bio(client, counterparty_username)
+        # For counterparty, use user ID if provided, otherwise use username
+        if counterparty_user_id:
+            counterparty_has_room = await fetch_and_store_user_bio_by_id(client, counterparty_user_id)
+        else:
+            counterparty_has_room = await fetch_and_store_user_bio(client, counterparty_username)
         
         # Calculate fee tier based on bios
         if initiator_has_room and counterparty_has_room:
@@ -279,6 +313,7 @@ ALL COMMANDS ARE CASE-SENSITIVE
             'room_name': room_name,
             'initiator_username': initiator_username,
             'counterparty_username': counterparty_username,
+            'counterparty_user_id': counterparty_user_id,
             'invite_link': '',
             'chat_id': chat_id,
             'bot_invite_link': ''
@@ -505,6 +540,7 @@ ALL COMMANDS ARE CASE-SENSITIVE
             'room_name': room_name,
             'initiator_username': initiator_username,
             'counterparty_username': counterparty_username,
+            'counterparty_user_id': counterparty_user_id,
             'invite_link': str(invite_link),
             'chat_id': chat_id,
             'bot_invite_link': bot_invite_link,
@@ -545,13 +581,15 @@ async def process_deal_requests(client):
                 for req in requests:
                     initiator_username = req.get('initiator_username')
                     counterparty_username = req.get('counterparty_username')
+                    counterparty_user_id = req.get('counterparty_user_id')
                     bot_token = req.get('bot_token', '')
                     
                     chat_id, room_name, invite_link = await create_deal_room(
                         client,
                         initiator_username,
                         counterparty_username,
-                        bot_token
+                        bot_token,
+                        counterparty_user_id
                     )
                     
                     if chat_id:
