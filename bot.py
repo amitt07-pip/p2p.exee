@@ -169,6 +169,7 @@ payment_confirmations = {}  # Track payment confirmations: {chat_id: {'sent': bo
 room_awaiting_hash = {}  # Track which rooms are awaiting transaction hash: {chat_id: 'awaiting_hash'}
 room_creation_times = {}  # Track when each room was created for time calculation: {chat_id: timestamp}
 room_confirmed_deposits = {}  # Track confirmed deposits: {chat_id: amount}
+room_log_messages = {}  # Track room log message IDs: {chat_id: {'msg_id': int, 'chat_id': int}}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
 
 # Admin user IDs who can use admin commands like /setownerwallet
@@ -1762,6 +1763,9 @@ Remaining: {network_fee:.4f} {coin}
             # Mark deal as completed in database
             database.complete_deal(original_chat_id)
             
+            # Update room log message with deal completed status
+            await update_room_log_status(context.bot, original_chat_id, "Deal Completed!")
+            
             # Send notification to logs channel
             try:
                 amount_str = f"{amount} {coin}" if amount else "N/A"
@@ -2450,6 +2454,11 @@ Once you've sent the amount, tap the button below."""
                             )
                             deposit_address_messages[chat_id] = msg.message_id
                             logger.warning(f"⚠️ Sent deposit address (text only) to room {chat_id} - image not found")
+                        
+                        # Update room log message with deposit address status
+                        # Format: Deposit [{first 3 chars}....{last 4 chars}]
+                        addr_display = f"{deposit_address[:5]}....{deposit_address[-4:]}"
+                        await update_room_log_status(context.bot, chat_id, f"Deposit [{addr_display}]")
                     except Exception as e:
                         logger.warning(f"Could not send deposit address message: {e}")
                 
@@ -3799,6 +3808,93 @@ async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> Non
         logger.warning(f"❌ Failed to send deal summary message: {e}")
 
 
+async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_username: str, 
+                                 token_name: str, blockchain: str, amount: str, status: str) -> None:
+    """Send or update the room log message with current status"""
+    try:
+        send_chat_id = get_send_chat_id(chat_id)
+        
+        # Build the log message text
+        log_text = (
+            f"<b><u>NEW ROOM CREATED</u></b>\n\n"
+            f"<b>Buyer:</b> @{buyer_username}\n"
+            f"<b>Seller:</b> @{seller_username}\n"
+            f"<b>Token:</b> {token_name} [{blockchain}]\n"
+            f"<b>Amount:</b> {amount}\n"
+            f"<b>Current Stage:</b> {status}"
+        )
+        
+        # Check if we already have a log message for this room
+        if chat_id in room_log_messages:
+            # Edit existing message
+            try:
+                msg_info = room_log_messages[chat_id]
+                await bot.edit_message_text(
+                    chat_id=msg_info['chat_id'],
+                    message_id=msg_info['msg_id'],
+                    text=log_text,
+                    parse_mode='HTML'
+                )
+                logger.info(f"✅ Updated room log message for room {chat_id} - Status: {status}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not edit room log message: {e}")
+        else:
+            # Send new message
+            msg = await bot.send_message(
+                chat_id=send_chat_id,
+                text=log_text,
+                parse_mode='HTML'
+            )
+            room_log_messages[chat_id] = {'msg_id': msg.message_id, 'chat_id': send_chat_id}
+            logger.info(f"✅ Sent room log message for room {chat_id}")
+    
+    except Exception as e:
+        logger.warning(f"❌ Failed to send/update room log message: {e}")
+
+
+async def update_room_log_status(bot, chat_id: int, status: str) -> None:
+    """Update only the status field in the room log message"""
+    try:
+        if chat_id not in room_log_messages:
+            logger.warning(f"⚠️ No room log message found for room {chat_id}")
+            return
+        
+        # Get room data from database
+        room_data = database.get_room(chat_id)
+        if not room_data:
+            logger.warning(f"⚠️ No room data found for room {chat_id}")
+            return
+        
+        buyer_username = room_data.get('buyer_username', 'Unknown')
+        seller_username = room_data.get('seller_username', 'Unknown')
+        token_name = room_data.get('coin_type', 'Unknown')
+        blockchain = room_data.get('blockchain', 'Unknown')
+        amount = room_data.get('amount', 'Unknown')
+        
+        # Build the updated log message text
+        log_text = (
+            f"<b><u>NEW ROOM CREATED</u></b>\n\n"
+            f"<b>Buyer:</b> @{buyer_username}\n"
+            f"<b>Seller:</b> @{seller_username}\n"
+            f"<b>Token:</b> {token_name} [{blockchain}]\n"
+            f"<b>Amount:</b> {amount}\n"
+            f"<b>Current Stage:</b> {status}"
+        )
+        
+        # Edit existing message
+        msg_info = room_log_messages[chat_id]
+        await bot.edit_message_text(
+            chat_id=msg_info['chat_id'],
+            message_id=msg_info['msg_id'],
+            text=log_text,
+            parse_mode='HTML'
+        )
+        logger.info(f"✅ Updated room log status for room {chat_id} - Status: {status}")
+    
+    except Exception as e:
+        logger.warning(f"❌ Failed to update room log status: {e}")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle text messages for listing creation and transaction steps"""
     user = update.effective_user
@@ -4073,6 +4169,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             send_chat_id = -1000000000000 - original_chat_id
             await send_deal_summary_message(context.bot, send_chat_id, original_chat_id)
             
+            # Send room log message with "Deal Summary" status
+            room_data = database.get_room(original_chat_id)
+            if room_data:
+                buyer_username = room_data.get('buyer_username', 'Unknown')
+                seller_username = room_data.get('seller_username', 'Unknown')
+                token_name = room_data.get('coin_type', 'Unknown')
+                blockchain = room_data.get('blockchain', 'Unknown')
+                amount = room_data.get('amount', 'Unknown')
+                await send_room_log_message(context.bot, original_chat_id, buyer_username, seller_username, 
+                                           token_name, blockchain, amount, "Deal Summary")
+            
             room_transaction_state[original_chat_id] = 'deal_summary'
             return
         
@@ -4249,6 +4356,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                         tx_hash,
                         block_number=verify_result['block_number']
                     )
+                    
+                    # Update room log message with deposit received status
+                    await update_room_log_status(context.bot, original_chat_id, f"Deposit Received [{received_amount}]")
                     
                     # Remove button from deposit address message
                     if original_chat_id in deposit_address_messages:
