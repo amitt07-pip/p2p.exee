@@ -4793,9 +4793,13 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
         
         initiator_username = room_info.get('initiator_username', '')
         counterparty_username = room_info.get('counterparty_username', '')
+        counterparty_user_id = room_info.get('counterparty_user_id')
         room_name = room_info.get('room_name', '')
         
-        logger.info(f"Room info found: {room_name} - initiator: @{initiator_username}, counterparty: @{counterparty_username}")
+        if counterparty_user_id:
+            logger.info(f"Room info found: {room_name} - initiator: @{initiator_username}, counterparty: User {counterparty_user_id}")
+        else:
+            logger.info(f"Room info found: {room_name} - initiator: @{initiator_username}, counterparty: @{counterparty_username}")
         
         # Track room creation time for time calculation later
         if chat_id not in room_creation_times:
@@ -4842,11 +4846,18 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
             # Send counterparty message - with delay and to the same working chat_id
             await asyncio.sleep(0.1)  # Minimal delay between messages
             
+            # Format counterparty display - use hyperlink for user ID, @username otherwise
+            if counterparty_user_id:
+                counterparty_display = f"<a href=\"tg://user?id={counterparty_user_id}\">User {counterparty_user_id}</a>"
+            else:
+                counterparty_display = f"@{counterparty_username}"
+            
             if successful_chat_id:
                 try:
                     msg2 = await application.bot.send_message(
                         chat_id=successful_chat_id,
-                        text=f"⏳ Waiting for @{counterparty_username} to join…"
+                        text=f"⏳ Waiting for {counterparty_display} to join…",
+                        parse_mode='HTML'
                     )
                     logger.info(f"✅ Sent counterparty waiting message with chat_id {successful_chat_id} (ID: {msg2.message_id})")
                 except Exception as e:
@@ -4860,7 +4871,8 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
                     try:
                         msg2 = await application.bot.send_message(
                             chat_id=try_id,
-                            text=f"⏳ Waiting for @{counterparty_username} to join…"
+                            text=f"⏳ Waiting for {counterparty_display} to join…",
+                            parse_mode='HTML'
                         )
                         logger.info(f"✅ Sent counterparty message to {try_id} (ID: {msg2.message_id})")
                         successful_chat_id = try_id
