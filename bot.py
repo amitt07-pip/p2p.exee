@@ -1581,8 +1581,7 @@ Examples:
         verified_text = f"""✅ Address <b>verified</b>
 
 Token: {info['token']}
-Chain: {info['chain']}
-Wallet Type: {info['type']}"""
+Chain: {info['chain']}"""
         await update.effective_chat.send_message(verified_text, parse_mode='HTML')
         logger.info(f"✅ Address verified for user {user.id}: {address_to_verify} ({info['token']} on {info['chain']})")
     else:
