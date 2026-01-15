@@ -4521,8 +4521,12 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
         room_name = room_info.get('room_name', '')
         initiator_username = room_info.get('initiator_username', '')
         counterparty_username = room_info.get('counterparty_username', '')
+        counterparty_user_id = room_info.get('counterparty_user_id')
         
-        logger.info(f"Room found: {room_name}, initiator: @{initiator_username}, counterparty: @{counterparty_username}")
+        if counterparty_user_id:
+            logger.info(f"Room found: {room_name}, initiator: @{initiator_username}, counterparty: User {counterparty_user_id}")
+        else:
+            logger.info(f"Room found: {room_name}, initiator: @{initiator_username}, counterparty: @{counterparty_username}")
         logger.info(f"Stored rooms in memory: {list(room_messages.keys())}")
         
         # Get stored message IDs for this room
@@ -4563,9 +4567,26 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
         else:
             logger.info(f"Username @{username} != initiator @{initiator_username}")
         
-        # Delete waiting message and send new joined message for counterparty (case-insensitive)
-        if username.lower() == counterparty_username.lower():
-            logger.info(f"Checking counterparty message for @{username} == @{counterparty_username}")
+        # Delete waiting message and send new joined message for counterparty (case-insensitive or by user_id)
+        # Check if this user is the counterparty - by username or by user_id
+        is_counterparty = False
+        if counterparty_user_id:
+            # When counterparty is identified by user_id, we need to get the joining user's ID
+            # For now, check if username matches (user might have a username even if identified by ID)
+            if counterparty_username and username and username.lower() == counterparty_username.lower():
+                is_counterparty = True
+            # Also mark as counterparty if no username match but this is the expected user
+            # (The handle_chat_join_request already verified by user_id)
+            elif not counterparty_username or counterparty_username == '':
+                is_counterparty = True  # Trust that handle_chat_join_request verified correctly
+        elif counterparty_username and username:
+            is_counterparty = (username.lower() == counterparty_username.lower())
+        
+        if is_counterparty:
+            if counterparty_user_id:
+                logger.info(f"Checking counterparty message for User {counterparty_user_id}")
+            else:
+                logger.info(f"Checking counterparty message for @{username} == @{counterparty_username}")
             if 'counterparty_msg_id' in msg_info:
                 try:
                     # Delete the waiting message
@@ -4576,10 +4597,16 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
                     )
                     logger.info(f"✅ Deleted counterparty waiting message in {room_name}")
                     
-                    # Send new joined message
+                    # Send new joined message - use hyperlink for user ID, @username otherwise
+                    if counterparty_user_id:
+                        counterparty_display = f"<a href=\"tg://user?id={counterparty_user_id}\">User {counterparty_user_id}</a>"
+                    else:
+                        counterparty_display = f"@{counterparty_username}"
+                    
                     new_msg = await bot.send_message(
                         chat_id=send_chat_id,
-                        text=f"✅ @{counterparty_username} joined."
+                        text=f"✅ {counterparty_display} joined.",
+                        parse_mode='HTML'
                     )
                     logger.info(f"✅ Sent new joined message for counterparty in {room_name}")
                     # Update stored message ID
@@ -4587,9 +4614,12 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
                 except Exception as e:
                     logger.warning(f"❌ Could not update counterparty message: {e}")
             else:
-                logger.info(f"ℹ️  Counterparty message wasn't stored (may have failed to send). Continuing with @{username}")
+                logger.info(f"ℹ️  Counterparty message wasn't stored (may have failed to send). Continuing with counterparty")
         else:
-            logger.info(f"Username @{username} != counterparty @{counterparty_username}")
+            if counterparty_user_id:
+                logger.info(f"User @{username} is not the counterparty (User {counterparty_user_id})")
+            else:
+                logger.info(f"Username @{username} != counterparty @{counterparty_username}")
         
         # Track joined users
         if original_chat_id not in room_joined_users:
