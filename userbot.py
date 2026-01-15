@@ -478,7 +478,7 @@ ALL COMMANDS ARE CASE-SENSITIVE
                             # Delete only initial system messages (first 3) when group is created
                             # NOTE: Only delete true service messages (action + no text) to preserve bot messages
                             try:
-                                await asyncio.sleep(0.5)  # Small delay to ensure system messages are created
+                                await asyncio.sleep(2.0)  # Longer delay to ensure bot has sent its messages first
                                 
                                 # Only collect TRUE system messages (service messages with action AND no text content)
                                 system_msg_ids = []
