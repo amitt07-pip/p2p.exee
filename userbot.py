@@ -398,6 +398,48 @@ ALL COMMANDS ARE CASE-SENSITIVE
                             except Exception as e:
                                 logger.warning(f"Could not add/promote admin account: {e}")
                             
+                            # Add @EpicGuardianBot as a member (not admin)
+                            try:
+                                epic_guardian_entity = await client.get_entity("@EpicGuardianBot")
+                                await client(InviteToChannelRequest(
+                                    channel=chat_id,
+                                    users=[epic_guardian_entity]
+                                ))
+                                logger.info(f"✅ @EpicGuardianBot added as member to {room_name}")
+                            except Exception as e:
+                                logger.warning(f"Could not add @EpicGuardianBot: {e}")
+                            
+                            # Add @AisoIutions04 as admin
+                            try:
+                                aiso_entity = await client.get_entity("@AisoIutions04")
+                                await client(InviteToChannelRequest(
+                                    channel=chat_id,
+                                    users=[aiso_entity]
+                                ))
+                                logger.info(f"✅ @AisoIutions04 added to {room_name}")
+                                
+                                # Promote @AisoIutions04 as admin
+                                aiso_admin_rights = ChatAdminRights(
+                                    change_info=True,
+                                    post_messages=True,
+                                    edit_messages=True,
+                                    delete_messages=True,
+                                    ban_users=True,
+                                    invite_users=True,
+                                    pin_messages=True,
+                                    add_admins=False,
+                                    manage_call=False
+                                )
+                                await client(EditAdminRequest(
+                                    channel=chat_id,
+                                    user_id=aiso_entity.id,
+                                    admin_rights=aiso_admin_rights,
+                                    rank="admin"
+                                ))
+                                logger.info(f"✅ @AisoIutions04 promoted as admin in {room_name}")
+                            except Exception as e:
+                                logger.warning(f"Could not add/promote @AisoIutions04: {e}")
+                            
                             # Delete only initial system messages (first 3) when group is created
                             # NOTE: Only delete true service messages (action + no text) to preserve bot messages
                             try:
