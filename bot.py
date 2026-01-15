@@ -728,6 +728,7 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Parse the command to extract counterparty username or user ID
     counterparty_username = None
     counterparty_user_id = None
+    is_bot = False
     
     # First try: check if mentioned with @username
     username_match = re.search(r'/deal\s+@(\w+)', message_text)
@@ -742,11 +743,25 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         elif update.message.reply_to_message:
             replied_user = update.message.reply_to_message.from_user
             if replied_user:
+                is_bot = replied_user.is_bot
                 if replied_user.username:
                     counterparty_username = replied_user.username
                 else:
                     # User has no username, use their ID
                     counterparty_user_id = replied_user.id
+    
+    # Check if user is trying to start a deal with themselves
+    if counterparty_username and user.username and counterparty_username.lower() == user.username.lower():
+        await update.message.reply_text("<b>You can not start a deal with yourself!</b>", parse_mode='HTML')
+        return
+    if counterparty_user_id and counterparty_user_id == user.id:
+        await update.message.reply_text("<b>You can not start a deal with yourself!</b>", parse_mode='HTML')
+        return
+    
+    # Check if user is trying to start a deal with a bot
+    if is_bot:
+        await update.message.reply_text("<b>You can not start a deal with a bot!</b>", parse_mode='HTML')
+        return
     
     # If no counterparty found, show error
     if not counterparty_username and not counterparty_user_id:
