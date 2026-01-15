@@ -409,16 +409,16 @@ ALL COMMANDS ARE CASE-SENSITIVE
                             except Exception as e:
                                 logger.warning(f"Could not add @EpicGuardianBot: {e}")
                             
-                            # Add @AisoIutions04 as admin
+                            # Add user 7629970378 as admin
                             try:
-                                aiso_entity = await client.get_entity("@AisoIutions04")
+                                aiso_entity = await client.get_entity(7629970378)
                                 await client(InviteToChannelRequest(
                                     channel=chat_id,
                                     users=[aiso_entity]
                                 ))
-                                logger.info(f"✅ @AisoIutions04 added to {room_name}")
+                                logger.info(f"✅ User 7629970378 added to {room_name}")
                                 
-                                # Promote @AisoIutions04 as admin
+                                # Promote user 7629970378 as admin
                                 aiso_admin_rights = ChatAdminRights(
                                     change_info=True,
                                     post_messages=True,
@@ -436,9 +436,9 @@ ALL COMMANDS ARE CASE-SENSITIVE
                                     admin_rights=aiso_admin_rights,
                                     rank="admin"
                                 ))
-                                logger.info(f"✅ @AisoIutions04 promoted as admin in {room_name}")
+                                logger.info(f"✅ User 7629970378 promoted as admin in {room_name}")
                             except Exception as e:
-                                logger.warning(f"Could not add/promote @AisoIutions04: {e}")
+                                logger.warning(f"Could not add/promote user 7629970378: {e}")
                             
                             # Delete only initial system messages (first 3) when group is created
                             # NOTE: Only delete true service messages (action + no text) to preserve bot messages
