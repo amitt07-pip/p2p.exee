@@ -2500,9 +2500,15 @@ Once you've sent the amount, tap the button below."""
                 await query.answer("❌ Role selection expired", show_alert=True)
                 return CHOOSING
             
-            msg_id, send_chat_id, initiator_username, counterparty_username = role_messages[original_chat_id]
-            initiator_lower = initiator_username.lower()
-            counterparty_lower = counterparty_username.lower()
+            role_msg_data = role_messages[original_chat_id]
+            # Handle both old format (4 elements) and new format (5 elements with counterparty_user_id)
+            if len(role_msg_data) == 5:
+                msg_id, send_chat_id, initiator_username, counterparty_username, counterparty_user_id = role_msg_data
+            else:
+                msg_id, send_chat_id, initiator_username, counterparty_username = role_msg_data
+                counterparty_user_id = None
+            initiator_lower = initiator_username.lower() if initiator_username else ''
+            counterparty_lower = counterparty_username.lower() if counterparty_username else ''
             
             # Initialize roles if needed
             if original_chat_id not in user_roles:
@@ -2544,6 +2550,12 @@ Once you've sent the amount, tap the button below."""
             initiator_display = initiator_role if initiator_role else 'Waiting...'
             counterparty_display = counterparty_role if counterparty_role else 'Waiting...'
             
+            # Format counterparty display name - use hyperlink for user ID, @username otherwise
+            if counterparty_user_id:
+                counterparty_display_name = f"<a href=\"tg://user?id={counterparty_user_id}\">User {counterparty_user_id}</a>"
+            else:
+                counterparty_display_name = f"@{counterparty_username}"
+            
             # Update message text
             updated_text = (
                 "<b>📋 Step 1 - Select Roles</b>\n\n"
@@ -2551,7 +2563,7 @@ Once you've sent the amount, tap the button below."""
                 "<b>As release & refund happen according to roles</b>\n\n"
                 "<b>Refund goes to seller & release to buyer</b>\n\n"
                 f"<b>{initiator_status}</b> @{initiator_username} - {initiator_display}\n"
-                f"<b>{counterparty_status}</b> @{counterparty_username} - {counterparty_display}"
+                f"<b>{counterparty_status}</b> {counterparty_display_name} - {counterparty_display}"
             )
             
             # Create keyboard - buttons always visible
@@ -4676,7 +4688,12 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
                         logger.info(f"✅ Deleted old deal created message {deal_msg_id} in chat {deal_chat_id}")
                         
                         # Send new text-only message with trade started caption
-                        trade_started_text = f"✅ <b>Trade started between @{initiator_username} and @{counterparty_username}.</b>"
+                        # Format counterparty display - use hyperlink for user ID, @username otherwise
+                        if counterparty_user_id:
+                            counterparty_trade_display = f"<a href=\"tg://user?id={counterparty_user_id}\">User {counterparty_user_id}</a>"
+                        else:
+                            counterparty_trade_display = f"@{counterparty_username}"
+                        trade_started_text = f"✅ <b>Trade started between @{initiator_username} and {counterparty_trade_display}.</b>"
                         
                         new_msg = await bot.send_message(
                             chat_id=deal_chat_id,
@@ -4759,7 +4776,8 @@ async def send_role_selection_message(bot, send_chat_id: int, room_name: str, or
         initiator_username = joined_usernames[0]
         counterparty_username = joined_usernames[1]
         
-        # Get from room data to get proper casing
+        # Get from room data to get proper casing and counterparty_user_id
+        counterparty_user_id = None
         if os.path.exists(DEAL_ROOMS_FILE):
             with open(DEAL_ROOMS_FILE, 'r') as f:
                 deal_rooms = json.load(f)
@@ -4767,6 +4785,13 @@ async def send_role_selection_message(bot, send_chat_id: int, room_name: str, or
             if room_info:
                 initiator_username = room_info.get('initiator_username', initiator_username)
                 counterparty_username = room_info.get('counterparty_username', counterparty_username)
+                counterparty_user_id = room_info.get('counterparty_user_id')
+        
+        # Format counterparty display - use hyperlink for user ID, @username otherwise
+        if counterparty_user_id:
+            counterparty_display_name = f"<a href=\"tg://user?id={counterparty_user_id}\">User {counterparty_user_id}</a>"
+        else:
+            counterparty_display_name = f"@{counterparty_username}"
         
         # Initialize roles tracking
         if original_chat_id not in user_roles:
@@ -4778,7 +4803,7 @@ async def send_role_selection_message(bot, send_chat_id: int, room_name: str, or
             "<b>As release & refund happen according to roles</b>\n\n"
             "<b>Refund goes to seller & release to buyer</b>\n\n"
             f"⏳ @{initiator_username} - Waiting...\n"
-            f"⏳ @{counterparty_username} - Waiting..."
+            f"⏳ {counterparty_display_name} - Waiting..."
         )
         
         # Create buttons side by side
@@ -4800,7 +4825,7 @@ async def send_role_selection_message(bot, send_chat_id: int, room_name: str, or
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
-            role_messages[original_chat_id] = (msg.message_id, send_chat_id, initiator_username, counterparty_username)
+            role_messages[original_chat_id] = (msg.message_id, send_chat_id, initiator_username, counterparty_username, counterparty_user_id)
             logger.info(f"✅ Sent role selection message to {room_name} (message ID: {msg.message_id})")
         else:
             msg = await bot.send_message(
@@ -4809,7 +4834,7 @@ async def send_role_selection_message(bot, send_chat_id: int, room_name: str, or
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
-            role_messages[original_chat_id] = (msg.message_id, send_chat_id, initiator_username, counterparty_username)
+            role_messages[original_chat_id] = (msg.message_id, send_chat_id, initiator_username, counterparty_username, counterparty_user_id)
             logger.warning(f"⚠️ Sent role selection (text only) to {room_name} - image not found")
     
     except Exception as e:
