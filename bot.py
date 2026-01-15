@@ -3860,15 +3860,15 @@ async def update_room_log_status(bot, chat_id: int, status: str) -> None:
             return
         
         # Get room data from database
-        room_data = database.get_room(chat_id)
+        room_data = database.get_deal(chat_id)
         if not room_data:
             logger.warning(f"⚠️ No room data found for room {chat_id}")
             return
         
         buyer_username = room_data.get('buyer_username', 'Unknown')
         seller_username = room_data.get('seller_username', 'Unknown')
-        token_name = room_data.get('coin_type', 'Unknown')
-        blockchain = room_data.get('blockchain', 'Unknown')
+        token_name = room_data.get('coin', 'Unknown')
+        blockchain = room_data.get('network', 'Unknown')
         amount = room_data.get('amount', 'Unknown')
         
         # Build the updated log message text
@@ -4170,12 +4170,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             await send_deal_summary_message(context.bot, send_chat_id, original_chat_id)
             
             # Send room log message with "Deal Summary" status
-            room_data = database.get_room(original_chat_id)
+            room_data = database.get_deal(original_chat_id)
             if room_data:
                 buyer_username = room_data.get('buyer_username', 'Unknown')
                 seller_username = room_data.get('seller_username', 'Unknown')
-                token_name = room_data.get('coin_type', 'Unknown')
-                blockchain = room_data.get('blockchain', 'Unknown')
+                token_name = room_data.get('coin', 'Unknown')
+                blockchain = room_data.get('network', 'Unknown')
                 amount = room_data.get('amount', 'Unknown')
                 await send_room_log_message(context.bot, original_chat_id, buyer_username, seller_username, 
                                            token_name, blockchain, amount, "Deal Summary")
