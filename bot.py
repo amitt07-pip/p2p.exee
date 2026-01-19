@@ -3809,9 +3809,10 @@ async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> Non
 
 async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_username: str, 
                                  token_name: str, blockchain: str, amount: str, status: str) -> None:
-    """Send or update the room log message with current status"""
+    """Send or update the room log message with current status to the logs channel"""
     try:
-        send_chat_id = get_send_chat_id(chat_id)
+        # Logs channel ID
+        logs_channel_id = -1003266978268
         
         # Build the log message text
         log_text = (
@@ -3825,27 +3826,27 @@ async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_u
         
         # Check if we already have a log message for this room
         if chat_id in room_log_messages:
-            # Edit existing message
+            # Edit existing message in logs channel
             try:
                 msg_info = room_log_messages[chat_id]
                 await bot.edit_message_text(
-                    chat_id=msg_info['chat_id'],
+                    chat_id=logs_channel_id,
                     message_id=msg_info['msg_id'],
                     text=log_text,
                     parse_mode='HTML'
                 )
-                logger.info(f"✅ Updated room log message for room {chat_id} - Status: {status}")
+                logger.info(f"✅ Updated room log message in logs channel for room {chat_id} - Status: {status}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not edit room log message: {e}")
         else:
-            # Send new message
+            # Send new message to logs channel
             msg = await bot.send_message(
-                chat_id=send_chat_id,
+                chat_id=logs_channel_id,
                 text=log_text,
                 parse_mode='HTML'
             )
-            room_log_messages[chat_id] = {'msg_id': msg.message_id, 'chat_id': send_chat_id}
-            logger.info(f"✅ Sent room log message for room {chat_id}")
+            room_log_messages[chat_id] = {'msg_id': msg.message_id, 'chat_id': logs_channel_id}
+            logger.info(f"✅ Sent room log message to logs channel for room {chat_id}")
     
     except Exception as e:
         logger.warning(f"❌ Failed to send/update room log message: {e}")
