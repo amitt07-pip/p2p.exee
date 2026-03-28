@@ -171,7 +171,7 @@ room_creation_times = {}  # Track when each room was created for time calculatio
 room_confirmed_deposits = {}  # Track confirmed deposits: {chat_id: amount}
 room_log_messages = {}  # Track room log message IDs: {chat_id: {'msg_id': int, 'chat_id': int}}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
-current_fee_percent = None  # Global service fee override (set via !setfees command, None = use per-room fee tiers)
+current_fee_percent = 0.0  # Global service fee (set via !setfees command, default 0%)
 
 # Admin user IDs who can use admin commands like /setownerwallet
 ADMIN_USER_IDS = {6864194951, 7338429782}
@@ -459,24 +459,26 @@ def load_fee_setting():
         row = cur.fetchone()
         if row:
             current_fee_percent = float(row[0])
-            logger.info(f"Loaded fee setting: {current_fee_percent}%")
+        else:
+            current_fee_percent = 0.0
+        logger.info(f"Loaded fee setting: {format_fee_percent(current_fee_percent)}")
         cur.close()
         conn.close()
     except Exception as e:
         logger.warning(f"Could not load fee setting: {e}")
 
 
+def format_fee_percent(fee: float) -> str:
+    """Format fee percentage cleanly: 0% instead of 0.0%, 1.5% instead of 1.50%"""
+    if fee == int(fee):
+        return f"{int(fee)}%"
+    return f"{fee}%"
+
+
 def get_service_fee_percent(chat_id: int) -> float:
     """Get the service fee percentage for a room.
-    If a global fee is set via !setfees, use that.
-    Otherwise fall back to the per-room fee tier from userbot."""
-    if current_fee_percent is not None:
-        return current_fee_percent
-    stored_fee_tier = room_fee_tiers.get(chat_id, '0.75%')
-    try:
-        return float(stored_fee_tier.replace('%', ''))
-    except (ValueError, AttributeError):
-        return 0.75
+    Uses the global fee set via !setfees command."""
+    return current_fee_percent
 
 
 def save_room_data(chat_id: int):
@@ -625,11 +627,8 @@ async def check_and_send_deal_results(application, initiator_username):
                             # Use user invite link if available, fallback to bot link
                             link_to_send = invite_link if invite_link and invite_link not in ['None', 'null', ''] else bot_invite_link
                             
-                            # Get fee tier: use global fee from !setfees if set, otherwise from userbot result
-                            if current_fee_percent is not None:
-                                fee_tier = f"{current_fee_percent}%"
-                            else:
-                                fee_tier = result.get('fee_tier', '0.75%')
+                            # Use global fee set via !setfees
+                            fee_tier = format_fee_percent(current_fee_percent)
                             
                             # Store fee tier for this room (to be used in deal summary)
                             if chat_id:
@@ -1581,7 +1580,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 Net Release Amount: {release_amount_formatted} {token} (After Fees)
 <b>Token:</b> {token}
 <b>Network:</b> {network}
-<b>Fees:</b> {service_fee_percent}% + {network_fee_formatted} {token}
+<b>Fees:</b> {format_fee_percent(service_fee_percent)} + {network_fee_formatted} {token}
 
 This is the current available balance for this trade."""
     
@@ -1752,41 +1751,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else:  # BSC
                 network_fee = 0.2
             
-            # Calculate service fee: Use global fee if set via !setfees, otherwise bio-based logic
-            if current_fee_percent is not None:
-                service_fee_percent = current_fee_percent
-            else:
-                buyer_has_room = False
-                seller_has_room = False
-                
-                buyer_user_id_db = get_user_id(buyer_username) if buyer_username else None
-                seller_user_id_db = get_user_id(seller_username) if seller_username else None
-                
-                if buyer_user_id_db:
-                    buyer_bio_flag = database.get_user_bio_flag(buyer_user_id_db)
-                    if buyer_bio_flag is not None:
-                        buyer_has_room = buyer_bio_flag
-                elif buyer_username:
-                    buyer_bio_flag = database.get_user_bio_flag_by_username(buyer_username)
-                    if buyer_bio_flag is not None:
-                        buyer_has_room = buyer_bio_flag
-                
-                if seller_user_id_db:
-                    seller_bio_flag = database.get_user_bio_flag(seller_user_id_db)
-                    if seller_bio_flag is not None:
-                        seller_has_room = seller_bio_flag
-                elif seller_username:
-                    seller_bio_flag = database.get_user_bio_flag_by_username(seller_username)
-                    if seller_bio_flag is not None:
-                        seller_has_room = seller_bio_flag
-                
-                # Determine service fee percentage
-                if buyer_has_room and seller_has_room:
-                    service_fee_percent = 0.25
-                elif buyer_has_room or seller_has_room:
-                    service_fee_percent = 0.5
-                else:
-                    service_fee_percent = 0.75
+            # Use global service fee set via !setfees
+            service_fee_percent = current_fee_percent
             
             service_fee_amount = amount * (service_fee_percent / 100)
             
@@ -2408,7 +2374,7 @@ Release has been declined by the seller."""
                 
                 # Format values - use .1f for clean display (203.0 instead of 203.00000000)
                 deal_amount = f"{float(amount):.1f} {coin}" if amount else f"0.0 {coin}"
-                fees = f"{service_fee_percent}%"  # Service fee as percentage (same as deal summary)
+                fees = format_fee_percent(service_fee_percent)  # Service fee as percentage (same as deal summary)
                 release_amount = f"{release_amount_value:.1f} {coin}"
                 
                 # Format deal confirmed text with monospace for addresses
@@ -3784,7 +3750,7 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
     amount_formatted = f"{float(amount):.1f}" if amount else "0.0"
     rate_formatted = f"₹{rate:.1f}" if rate else "N/A"
     network_fee_formatted = f"{network_fee} {coin}"
-    service_fee_formatted = f"{service_fee_percent}%"
+    service_fee_formatted = format_fee_percent(service_fee_percent)
     release_amount_formatted = f"{release_amount:.1f} {coin}"
     
     # Build approval status strings
@@ -3985,11 +3951,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             
             await update.message.reply_text(
                 f"✅ <b>Escrow Fees Updated</b>\n\n"
-                f"New service fee: <b>{new_fee}%</b>\n\n"
+                f"New service fee: <b>{format_fee_percent(new_fee)}</b>\n\n"
                 f"This fee will apply to all deals from now on.",
                 parse_mode='HTML'
             )
-            logger.info(f"Admin @{user.username} set escrow fees to {new_fee}%")
+            logger.info(f"Admin @{user.username} set escrow fees to {format_fee_percent(new_fee)}")
         except ValueError:
             await update.message.reply_text("❌ Invalid fee amount. Please enter a valid number.")
         return
