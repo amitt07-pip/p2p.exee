@@ -171,6 +171,7 @@ room_creation_times = {}  # Track when each room was created for time calculatio
 room_confirmed_deposits = {}  # Track confirmed deposits: {chat_id: amount}
 room_log_messages = {}  # Track room log message IDs: {chat_id: {'msg_id': int, 'chat_id': int}}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
+current_fee_percent = None  # Global service fee override (set via !setfees command, None = use per-room fee tiers)
 
 # Admin user IDs who can use admin commands like /setownerwallet
 ADMIN_USER_IDS = {6864194951, 7338429782}
@@ -422,6 +423,61 @@ def get_ceo_wallet(network: str) -> str:
     elif network == 'TRON':
         return ceo_wallet_cache.get('TRON', DEFAULT_CEO_WALLET_TRON)
     return ceo_wallet_cache.get('BSC', DEFAULT_CEO_WALLET_BSC)
+
+def save_fee_setting(fee_percent: float):
+    """Save fee percentage to database"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        cur.execute(
+            "INSERT INTO bot_settings (key, value) VALUES ('fee_percent', %s) ON CONFLICT (key) DO UPDATE SET value = %s",
+            (str(fee_percent), str(fee_percent))
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"Saved fee setting: {fee_percent}%")
+    except Exception as e:
+        logger.warning(f"Could not save fee setting: {e}")
+
+
+def load_fee_setting():
+    """Load fee percentage from database on startup"""
+    global current_fee_percent
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("SELECT value FROM bot_settings WHERE key = 'fee_percent'")
+        row = cur.fetchone()
+        if row:
+            current_fee_percent = float(row[0])
+            logger.info(f"Loaded fee setting: {current_fee_percent}%")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Could not load fee setting: {e}")
+
+
+def get_service_fee_percent(chat_id: int) -> float:
+    """Get the service fee percentage for a room.
+    If a global fee is set via !setfees, use that.
+    Otherwise fall back to the per-room fee tier from userbot."""
+    if current_fee_percent is not None:
+        return current_fee_percent
+    stored_fee_tier = room_fee_tiers.get(chat_id, '0.75%')
+    try:
+        return float(stored_fee_tier.replace('%', ''))
+    except (ValueError, AttributeError):
+        return 0.75
+
 
 def save_room_data(chat_id: int):
     """Save room data to database"""
@@ -1499,12 +1555,8 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         network_fee = 0.2
     
-    # Service fee: Get from room_fee_tiers or default to 0.75%
-    stored_fee_tier = room_fee_tiers.get(original_chat_id, '0.75%')
-    try:
-        service_fee_percent = float(stored_fee_tier.replace('%', ''))
-    except:
-        service_fee_percent = 0.75
+    # Service fee: Use global fee if set via !setfees, otherwise per-room fee tier
+    service_fee_percent = get_service_fee_percent(original_chat_id)
     
     # Calculate service fee amount and release amount
     service_fee_amount = amount * (service_fee_percent / 100)
@@ -1697,38 +1749,41 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else:  # BSC
                 network_fee = 0.2
             
-            # Calculate service fee based on user bios
-            buyer_has_room = False
-            seller_has_room = False
-            
-            buyer_user_id_db = get_user_id(buyer_username) if buyer_username else None
-            seller_user_id_db = get_user_id(seller_username) if seller_username else None
-            
-            if buyer_user_id_db:
-                buyer_bio_flag = database.get_user_bio_flag(buyer_user_id_db)
-                if buyer_bio_flag is not None:
-                    buyer_has_room = buyer_bio_flag
-            elif buyer_username:
-                buyer_bio_flag = database.get_user_bio_flag_by_username(buyer_username)
-                if buyer_bio_flag is not None:
-                    buyer_has_room = buyer_bio_flag
-            
-            if seller_user_id_db:
-                seller_bio_flag = database.get_user_bio_flag(seller_user_id_db)
-                if seller_bio_flag is not None:
-                    seller_has_room = seller_bio_flag
-            elif seller_username:
-                seller_bio_flag = database.get_user_bio_flag_by_username(seller_username)
-                if seller_bio_flag is not None:
-                    seller_has_room = seller_bio_flag
-            
-            # Determine service fee percentage
-            if buyer_has_room and seller_has_room:
-                service_fee_percent = 0.25
-            elif buyer_has_room or seller_has_room:
-                service_fee_percent = 0.5
+            # Calculate service fee: Use global fee if set via !setfees, otherwise bio-based logic
+            if current_fee_percent is not None:
+                service_fee_percent = current_fee_percent
             else:
-                service_fee_percent = 0.75
+                buyer_has_room = False
+                seller_has_room = False
+                
+                buyer_user_id_db = get_user_id(buyer_username) if buyer_username else None
+                seller_user_id_db = get_user_id(seller_username) if seller_username else None
+                
+                if buyer_user_id_db:
+                    buyer_bio_flag = database.get_user_bio_flag(buyer_user_id_db)
+                    if buyer_bio_flag is not None:
+                        buyer_has_room = buyer_bio_flag
+                elif buyer_username:
+                    buyer_bio_flag = database.get_user_bio_flag_by_username(buyer_username)
+                    if buyer_bio_flag is not None:
+                        buyer_has_room = buyer_bio_flag
+                
+                if seller_user_id_db:
+                    seller_bio_flag = database.get_user_bio_flag(seller_user_id_db)
+                    if seller_bio_flag is not None:
+                        seller_has_room = seller_bio_flag
+                elif seller_username:
+                    seller_bio_flag = database.get_user_bio_flag_by_username(seller_username)
+                    if seller_bio_flag is not None:
+                        seller_has_room = seller_bio_flag
+                
+                # Determine service fee percentage
+                if buyer_has_room and seller_has_room:
+                    service_fee_percent = 0.25
+                elif buyer_has_room or seller_has_room:
+                    service_fee_percent = 0.5
+                else:
+                    service_fee_percent = 0.75
             
             service_fee_amount = amount * (service_fee_percent / 100)
             
@@ -2341,12 +2396,8 @@ Release has been declined by the seller."""
                 else:  # BSC
                     network_fee = 0.2
                 
-                # Get service fee from stored fee tier
-                stored_fee_tier = room_fee_tiers.get(chat_id, '0.75%')
-                try:
-                    service_fee_percent = float(stored_fee_tier.replace('%', ''))
-                except (ValueError, AttributeError):
-                    service_fee_percent = 0.75
+                # Get service fee: Use global fee if set via !setfees, otherwise per-room fee tier
+                service_fee_percent = get_service_fee_percent(chat_id)
                 
                 # Calculate service fee amount and release amount
                 service_fee_amount = amount_float * (service_fee_percent / 100)
@@ -3714,17 +3765,10 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
     else:  # BSC
         network_fee = 0.2
     
-    # Get service fee from stored fee tier (set when deal room was created)
-    # This ensures the service fee matches the fee tier shown in /deal command
-    stored_fee_tier = room_fee_tiers.get(chat_id, '0.75%')
+    # Get service fee: Use global fee if set via !setfees, otherwise per-room fee tier
+    service_fee_percent = get_service_fee_percent(chat_id)
     
-    # Parse the fee tier string to get the percentage value
-    try:
-        service_fee_percent = float(stored_fee_tier.replace('%', ''))
-    except (ValueError, AttributeError):
-        service_fee_percent = 0.75
-    
-    logger.info(f"📊 Using stored fee tier {stored_fee_tier} for room {chat_id}")
+    logger.info(f"📊 Using service fee {service_fee_percent}% for room {chat_id}")
     
     # Calculate service fee amount
     amount_float = float(amount) if amount else 0
@@ -3907,6 +3951,68 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         save_user_id(user.username, user_id)
     
     logger.info(f"📨 Message received from {user.username} in chat {chat_id}: {text[:50]}")
+    
+    # Handle !setfees command (admin-only, works in any chat)
+    if text.startswith('!setfees'):
+        # Check if user is an authorized admin
+        if user_id not in AUTHORIZED_KICK_USERS:
+            await update.message.reply_text("❌ You are not authorized to use this command.")
+            return
+        
+        # Parse the fee amount (e.g., !setfees 1% or !setfees 2.5%)
+        match = re.match(r'!setfees\s+([\d.]+)%?', text)
+        if not match:
+            await update.message.reply_text(
+                "❌ Invalid format!\n\n"
+                "Usage: <code>!setfees 1%</code>\n"
+                "Example: <code>!setfees 2.5%</code>",
+                parse_mode='HTML'
+            )
+            return
+        
+        try:
+            global current_fee_percent
+            new_fee = float(match.group(1))
+            if new_fee < 0 or new_fee > 100:
+                await update.message.reply_text("❌ Fee must be between 0% and 100%.")
+                return
+            
+            current_fee_percent = new_fee
+            save_fee_setting(new_fee)
+            
+            fee_bio = f"Escrow Fee: {new_fee}%"
+            
+            # Update room bio for all active deal rooms and update in-memory fee tiers
+            updated_rooms = 0
+            if os.path.exists(DEAL_ROOMS_FILE):
+                with open(DEAL_ROOMS_FILE, 'r') as f:
+                    deal_rooms_data = json.load(f)
+                
+                for chat_id_str in deal_rooms_data.keys():
+                    try:
+                        room_chat_id = int(chat_id_str)
+                        send_id = -1000000000000 - room_chat_id
+                        await context.bot.set_chat_description(
+                            chat_id=send_id,
+                            description=fee_bio
+                        )
+                        # Also update in-memory fee tier for this room
+                        room_fee_tiers[room_chat_id] = f"{new_fee}%"
+                        updated_rooms += 1
+                    except Exception as e:
+                        logger.warning(f"Could not update bio for room {chat_id_str}: {e}")
+            
+            await update.message.reply_text(
+                f"✅ <b>Escrow Fees Updated</b>\n\n"
+                f"New service fee: <b>{new_fee}%</b>\n"
+                f"Updated {updated_rooms} room(s) bio.\n\n"
+                f"This fee will apply to all deals from now on.",
+                parse_mode='HTML'
+            )
+            logger.info(f"Admin @{user.username} set escrow fees to {new_fee}%")
+        except ValueError:
+            await update.message.reply_text("❌ Invalid fee amount. Please enter a valid number.")
+        return
     
     step = context.user_data.get('step')
     
@@ -5082,6 +5188,18 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
                 # Mark room as waiting for join requests
                 rooms_waiting_for_requests.add(chat_id)
                 logger.info(f"🔔 Room {room_name} is now ACTIVELY LISTENING for join requests 👂")
+                
+                # Set room bio with current escrow fee if a global fee has been set
+                if current_fee_percent is not None and successful_chat_id:
+                    try:
+                        fee_bio = f"Escrow Fee: {current_fee_percent}%"
+                        await application.bot.set_chat_description(
+                            chat_id=successful_chat_id,
+                            description=fee_bio
+                        )
+                        logger.info(f"💰 Set fee bio for new room {room_name}: {fee_bio}")
+                    except Exception as e:
+                        logger.warning(f"Could not set fee bio for new room {room_name}: {e}")
             else:
                 logger.warning(f"❌ Failed to send any messages to {room_name}")
         except Exception as e:
@@ -5224,6 +5342,7 @@ def main() -> None:
     
     # Load persistent data from database
     load_room_data()
+    load_fee_setting()
     
     # Load user wallets from database
     load_wallets_from_database()
