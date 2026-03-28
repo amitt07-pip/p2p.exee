@@ -3980,36 +3980,39 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             current_fee_percent = new_fee
             save_fee_setting(new_fee)
             
-            fee_bio = f"Escrow Fee: {new_fee}%"
-            
-            # Update room bio for all active deal rooms and update in-memory fee tiers
-            updated_rooms = 0
-            if os.path.exists(DEAL_ROOMS_FILE):
-                with open(DEAL_ROOMS_FILE, 'r') as f:
-                    deal_rooms_data = json.load(f)
-                
-                for chat_id_str in deal_rooms_data.keys():
-                    try:
-                        room_chat_id = int(chat_id_str)
-                        send_id = -1000000000000 - room_chat_id
-                        await context.bot.set_chat_description(
-                            chat_id=send_id,
-                            description=fee_bio
-                        )
-                        # Also update in-memory fee tier for this room
-                        room_fee_tiers[room_chat_id] = f"{new_fee}%"
-                        updated_rooms += 1
-                    except Exception as e:
-                        logger.warning(f"Could not update bio for room {chat_id_str}: {e}")
-            
+            # Send confirmation immediately (don't block on room bio updates)
             await update.message.reply_text(
                 f"✅ <b>Escrow Fees Updated</b>\n\n"
                 f"New service fee: <b>{new_fee}%</b>\n"
-                f"Updated {updated_rooms} room(s) bio.\n\n"
+                f"Updating room bios in background...\n\n"
                 f"This fee will apply to all deals from now on.",
                 parse_mode='HTML'
             )
             logger.info(f"Admin @{user.username} set escrow fees to {new_fee}%")
+            
+            # Update room bios in background to avoid blocking the bot
+            async def update_room_bios_background():
+                fee_bio = f"Escrow Fee: {new_fee}%"
+                updated_rooms = 0
+                if os.path.exists(DEAL_ROOMS_FILE):
+                    with open(DEAL_ROOMS_FILE, 'r') as f:
+                        deal_rooms_data = json.load(f)
+                    
+                    for chat_id_str in deal_rooms_data.keys():
+                        try:
+                            room_chat_id = int(chat_id_str)
+                            send_id = -1000000000000 - room_chat_id
+                            await context.bot.set_chat_description(
+                                chat_id=send_id,
+                                description=fee_bio
+                            )
+                            room_fee_tiers[room_chat_id] = f"{new_fee}%"
+                            updated_rooms += 1
+                        except Exception:
+                            pass  # Silently skip dead/deleted rooms
+                logger.info(f"Background: Updated {updated_rooms} room(s) bio with fee {new_fee}%")
+            
+            asyncio.create_task(update_room_bios_background())
         except ValueError:
             await update.message.reply_text("❌ Invalid fee amount. Please enter a valid number.")
         return
