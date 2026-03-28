@@ -625,8 +625,11 @@ async def check_and_send_deal_results(application, initiator_username):
                             # Use user invite link if available, fallback to bot link
                             link_to_send = invite_link if invite_link and invite_link not in ['None', 'null', ''] else bot_invite_link
                             
-                            # Get fee tier from result (calculated by userbot based on user bios)
-                            fee_tier = result.get('fee_tier', '0.75%')
+                            # Get fee tier: use global fee from !setfees if set, otherwise from userbot result
+                            if current_fee_percent is not None:
+                                fee_tier = f"{current_fee_percent}%"
+                            else:
+                                fee_tier = result.get('fee_tier', '0.75%')
                             
                             # Store fee tier for this room (to be used in deal summary)
                             if chat_id:
@@ -3980,39 +3983,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             current_fee_percent = new_fee
             save_fee_setting(new_fee)
             
-            # Send confirmation immediately (don't block on room bio updates)
             await update.message.reply_text(
                 f"✅ <b>Escrow Fees Updated</b>\n\n"
-                f"New service fee: <b>{new_fee}%</b>\n"
-                f"Updating room bios in background...\n\n"
+                f"New service fee: <b>{new_fee}%</b>\n\n"
                 f"This fee will apply to all deals from now on.",
                 parse_mode='HTML'
             )
             logger.info(f"Admin @{user.username} set escrow fees to {new_fee}%")
-            
-            # Update room bios in background to avoid blocking the bot
-            async def update_room_bios_background():
-                fee_bio = f"Escrow Fee: {new_fee}%"
-                updated_rooms = 0
-                if os.path.exists(DEAL_ROOMS_FILE):
-                    with open(DEAL_ROOMS_FILE, 'r') as f:
-                        deal_rooms_data = json.load(f)
-                    
-                    for chat_id_str in deal_rooms_data.keys():
-                        try:
-                            room_chat_id = int(chat_id_str)
-                            send_id = -1000000000000 - room_chat_id
-                            await context.bot.set_chat_description(
-                                chat_id=send_id,
-                                description=fee_bio
-                            )
-                            room_fee_tiers[room_chat_id] = f"{new_fee}%"
-                            updated_rooms += 1
-                        except Exception:
-                            pass  # Silently skip dead/deleted rooms
-                logger.info(f"Background: Updated {updated_rooms} room(s) bio with fee {new_fee}%")
-            
-            asyncio.create_task(update_room_bios_background())
         except ValueError:
             await update.message.reply_text("❌ Invalid fee amount. Please enter a valid number.")
         return
@@ -5192,17 +5169,6 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
                 rooms_waiting_for_requests.add(chat_id)
                 logger.info(f"🔔 Room {room_name} is now ACTIVELY LISTENING for join requests 👂")
                 
-                # Set room bio with current escrow fee if a global fee has been set
-                if current_fee_percent is not None and successful_chat_id:
-                    try:
-                        fee_bio = f"Escrow Fee: {current_fee_percent}%"
-                        await application.bot.set_chat_description(
-                            chat_id=successful_chat_id,
-                            description=fee_bio
-                        )
-                        logger.info(f"💰 Set fee bio for new room {room_name}: {fee_bio}")
-                    except Exception as e:
-                        logger.warning(f"Could not set fee bio for new room {room_name}: {e}")
             else:
                 logger.warning(f"❌ Failed to send any messages to {room_name}")
         except Exception as e:
