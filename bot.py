@@ -142,6 +142,7 @@ payment_confirmations = {}  # Track payment confirmations: {chat_id: {'sent': bo
 room_awaiting_hash = {}  # Track which rooms are awaiting transaction hash: {chat_id: 'awaiting_hash'}
 room_creation_times = {}  # Track when each room was created for time calculation: {chat_id: timestamp}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
+current_fee_percent = 0.0  # Global fee percentage for all deals (set via !setfees command)
 deposit_addresses_map = {
     ("BSC", "USDT"): "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
     ("BSC", "USDC"): "0xDA4c2a5B876b0c7521e1c752690D8705080000fE",
@@ -182,6 +183,48 @@ def save_user_id(username: str, user_id: int):
 def get_user_id(username: str) -> int:
     """Get user_id from username"""
     return user_id_map.get(username.lower())
+
+def save_fee_setting(fee_percent: float):
+    """Save fee percentage to database"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        cur.execute(
+            "INSERT INTO bot_settings (key, value) VALUES ('fee_percent', %s) ON CONFLICT (key) DO UPDATE SET value = %s",
+            (str(fee_percent), str(fee_percent))
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"Saved fee setting: {fee_percent}%")
+    except Exception as e:
+        logger.warning(f"Could not save fee setting: {e}")
+
+
+def load_fee_setting():
+    """Load fee percentage from database on startup"""
+    global current_fee_percent
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("SELECT value FROM bot_settings WHERE key = 'fee_percent'")
+        row = cur.fetchone()
+        if row:
+            current_fee_percent = float(row[0])
+            logger.info(f"Loaded fee setting: {current_fee_percent}%")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Could not load fee setting: {e}")
+
 
 def save_room_data(chat_id: int):
     """Save room data to database"""
@@ -1439,9 +1482,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup = None
                 
                 # Get all transaction data for deal confirmed message
-                deal_amount = f"{amount} {coin if coin else 'USDT'}"
-                fees = "0.00 USDT"
-                release_amount = f"{amount} {coin if coin else 'USDT'}"
+                coin_name = coin if coin else 'USDT'
+                fee_value = round(amount * current_fee_percent / 100, 2) if amount and current_fee_percent > 0 else 0.0
+                release_value = round(amount - fee_value, 2) if amount else amount
+                deal_amount = f"{amount} {coin_name}"
+                fees = f"{fee_value} {coin_name}"
+                release_amount = f"{release_value} {coin_name}"
                 
                 # Format deal confirmed text with monospace for addresses
                 confirmed_text = f"""✅ <b>DEAL CONFIRMED</b>
@@ -2278,6 +2324,66 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         save_user_id(user.username, user_id)
     
     logger.info(f"📨 Message received from {user.username} in chat {chat_id}: {text[:50]}")
+    
+    # Handle !setfees command (admin-only, works in any chat)
+    if text.startswith('!setfees'):
+        # Check if user is an authorized admin
+        if user_id not in AUTHORIZED_KICK_USERS:
+            await update.message.reply_text("❌ You are not authorized to use this command.")
+            return
+        
+        # Parse the fee amount (e.g., !setfees 1% or !setfees 2.5%)
+        match = re.match(r'!setfees\s+([\d.]+)%?', text)
+        if not match:
+            await update.message.reply_text(
+                "❌ Invalid format!\n\n"
+                "Usage: <code>!setfees 1%</code>\n"
+                "Example: <code>!setfees 2.5%</code>",
+                parse_mode='HTML'
+            )
+            return
+        
+        try:
+            global current_fee_percent
+            new_fee = float(match.group(1))
+            if new_fee < 0 or new_fee > 100:
+                await update.message.reply_text("❌ Fee must be between 0% and 100%.")
+                return
+            
+            current_fee_percent = new_fee
+            save_fee_setting(new_fee)
+            
+            fee_bio = f"Escrow Fee: {new_fee}%"
+            
+            # Update room bio for all active deal rooms
+            updated_rooms = 0
+            if os.path.exists(DEAL_ROOMS_FILE):
+                with open(DEAL_ROOMS_FILE, 'r') as f:
+                    deal_rooms_data = json.load(f)
+                
+                for chat_id_str in deal_rooms_data.keys():
+                    try:
+                        room_chat_id = int(chat_id_str)
+                        send_id = -1000000000000 - room_chat_id
+                        await context.bot.set_chat_description(
+                            chat_id=send_id,
+                            description=fee_bio
+                        )
+                        updated_rooms += 1
+                    except Exception as e:
+                        logger.warning(f"Could not update bio for room {chat_id_str}: {e}")
+            
+            await update.message.reply_text(
+                f"✅ <b>Fees Updated</b>\n\n"
+                f"New fee: <b>{new_fee}%</b>\n"
+                f"Updated {updated_rooms} room(s) bio.\n\n"
+                f"This fee will apply to all deals from now on.",
+                parse_mode='HTML'
+            )
+            logger.info(f"Admin @{user.username} set fees to {new_fee}%")
+        except ValueError:
+            await update.message.reply_text("❌ Invalid fee amount. Please enter a valid number.")
+        return
     
     step = context.user_data.get('step')
     
@@ -3141,6 +3247,18 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
             room_creation_times[chat_id] = time.time()
             logger.info(f"⏱️ Room creation time tracked for {room_name}")
         
+        # Set room bio with current fee if a fee is configured
+        if current_fee_percent > 0:
+            try:
+                fee_send_id = -1000000000000 - chat_id
+                await application.bot.set_chat_description(
+                    chat_id=fee_send_id,
+                    description=f"Escrow Fee: {current_fee_percent}%"
+                )
+                logger.info(f"✅ Set fee bio for new room {room_name}: {current_fee_percent}%")
+            except Exception as e:
+                logger.warning(f"Could not set fee bio for {room_name}: {e}")
+        
         # Send waiting messages
         try:
             # For supergroups, use the most reliable format first
@@ -3286,6 +3404,7 @@ def main() -> None:
     
     # Load persistent data from database
     load_room_data()
+    load_fee_setting()
     
     # Mark existing rooms as processed before starting
     mark_existing_rooms_processed()
