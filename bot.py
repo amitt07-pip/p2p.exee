@@ -5288,6 +5288,9 @@ def main() -> None:
     # Create a task to check for new deal rooms periodically
     async def start_background_tasks(app):
         """Start background tasks after app is initialized"""
+        # Explicitly delete any existing webhook to prevent getUpdates conflicts
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook deleted, starting clean polling session")
         # Create the task only after app is running
         app.create_task(check_new_deal_rooms(app), update=None)
         app.create_task(auto_close_expired_deals(app), update=None)
@@ -5296,15 +5299,15 @@ def main() -> None:
     # Schedule the background task to start after the bot is initialized
     application.post_init = start_background_tasks
     
-    # Start the bot with optimized polling for fast message detection
+    # Start the bot with polling - use reasonable timeout to avoid overlapping getUpdates requests
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,  # Clear any pending messages on startup
-        poll_interval=0,      # Poll immediately without delay
-        timeout=1,            # Ultra-short polling timeout for fastest response
-        read_timeout=5,       # Reduced socket read timeout
-        write_timeout=15,     # Reduced socket write timeout
-        connect_timeout=5     # Reduced connection timeout
+        poll_interval=0.5,    # Small delay between polls to prevent request overlap
+        timeout=10,           # Standard long-polling timeout (prevents rapid-fire requests)
+        read_timeout=15,      # Socket read timeout
+        write_timeout=15,     # Socket write timeout
+        connect_timeout=10    # Connection timeout
     )
     logger.info("✅ Telegram Bot Started - Ready for commands")
 
