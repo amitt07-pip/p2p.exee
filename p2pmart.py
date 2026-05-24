@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-P2PMART - Unified Entry Point
-Runs both the Telegram Bot and UserBot concurrently
+P2PMART - UserBot Entry Point
+Runs the Telegram UserBot (bot.py runs as a separate service)
 """
 
 import asyncio
-import threading
 import logging
 import sys
 
@@ -23,36 +22,16 @@ logging.getLogger('telegram.ext').setLevel(logging.WARNING)
 logging.getLogger('telethon').setLevel(logging.WARNING)
 
 
-def run_userbot():
-    """Run the UserBot in a separate thread"""
+def main():
+    """Start the userbot only (bot.py runs as a separate service)"""
+    logger.info("🚀 P2PMART UserBot Starting...")
+    
+    # Run userbot directly in the main thread
     try:
         from userbot import main as userbot_main
         asyncio.run(userbot_main())
     except KeyboardInterrupt:
-        logger.info("🛑 UserBot stopped")
-    except Exception as e:
-        logger.error(f"❌ UserBot error: {e}")
-
-
-async def run_bot():
-    """Run the Telegram Bot asynchronously (stub - actual run happens in main thread)"""
-    pass
-
-
-def main():
-    """Start both bot and userbot concurrently"""
-    logger.info("🚀 P2PMART Starting...")
-    
-    # Start userbot in a separate thread
-    userbot_thread = threading.Thread(target=run_userbot, daemon=False)
-    userbot_thread.start()
-    
-    # Run bot in the main thread (required for signal handling and polling)
-    try:
-        from bot import main as bot_main
-        bot_main()
-    except KeyboardInterrupt:
-        logger.info("🛑 P2PMART stopped")
+        logger.info("🛑 P2PMART UserBot stopped")
         sys.exit(0)
 
 
