@@ -48,7 +48,7 @@ deal_rooms = {}
 client = None
 
 def get_next_room_number():
-    """Get the next room number - cycles from 40 to 90, then restarts from 40"""
+    """Get the next room number - cycles from 40 to 60, then restarts from 40"""
     global room_counter
     try:
         room_info_file = "deal_rooms.json"
@@ -58,8 +58,8 @@ def get_next_room_number():
             if room_info:
                 max_room = max(info.get('room_number', 0) for info in room_info.values())
                 next_room = max_room + 1
-                # Cycle: if next_room > 90, restart from 40
-                if next_room > 90:
+                # Cycle: if next_room > 60, restart from 40
+                if next_room > 60:
                     next_room = 40
                 # Ensure minimum is 40
                 if next_room < 40:
