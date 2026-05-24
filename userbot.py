@@ -100,6 +100,16 @@ async def authenticate_client():
             logger.error("TELEGRAM_PHONE not set for initial login")
             return None
         
+        # Check if we're running in a non-interactive environment (e.g. systemd service)
+        import sys
+        if not sys.stdin or not sys.stdin.isatty():
+            logger.error(
+                "❌ UserBot session expired or missing. Interactive login required.\n"
+                "   Run manually: cd /root/p2p && source venv/bin/activate && python p2pmart.py\n"
+                "   Then restart the service after authentication completes."
+            )
+            return None
+        
         await client.send_code_request(PHONE_NUMBER)
         try:
             code = input('Enter the code you received: ')
