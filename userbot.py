@@ -83,7 +83,16 @@ async def authenticate_client():
         )
         return None
     
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    try:
+        client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    except (ValueError, Exception) as e:
+        # Session file is corrupted or incompatible with current Telethon version
+        session_file = f"{SESSION_NAME}.session"
+        logger.warning(f"⚠️ Session file corrupt ({e}), deleting {session_file} and retrying...")
+        if os.path.exists(session_file):
+            os.remove(session_file)
+        client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+    
     await client.connect()
     
     if not await client.is_user_authorized():
