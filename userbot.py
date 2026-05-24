@@ -506,29 +506,30 @@ ALL COMMANDS ARE CASE-SENSITIVE
                             except Exception as e:
                                 logger.warning(f"Could not add/promote @EpicGuardianBot: {e}")
                             
-                            # Add @AisoIutions04 (user ID 7629970378) as admin
+                            # Add @AisoIutions04 as admin (try username → user ID → phone)
                             try:
-                                # Try username first, fall back to user ID
                                 aiso_entity = None
                                 try:
                                     aiso_entity = await client.get_entity("@AisoIutions04")
-                                    logger.info(f"✅ Found @AisoIutions04 by username")
+                                    logger.info(f"✅ Found admin by username @AisoIutions04")
                                 except Exception:
                                     try:
-                                        from telethon.tl.types import InputPeerUser
                                         aiso_entity = await client.get_entity(7629970378)
-                                        logger.info(f"✅ Found user by ID 7629970378")
-                                    except Exception as e2:
-                                        logger.warning(f"Could not find @AisoIutions04 by username or ID: {e2}")
+                                        logger.info(f"✅ Found admin by user ID 7629970378")
+                                    except Exception:
+                                        try:
+                                            aiso_entity = await client.get_entity("+16592202558")
+                                            logger.info(f"✅ Found admin by phone +16592202558")
+                                        except Exception as e3:
+                                            logger.warning(f"Could not find admin by any method: {e3}")
                                 
                                 if aiso_entity:
                                     await client(InviteToChannelRequest(
                                         channel=chat_id,
                                         users=[aiso_entity]
                                     ))
-                                    logger.info(f"✅ @AisoIutions04 added to {room_name}")
+                                    logger.info(f"✅ Admin @AisoIutions04 added to {room_name}")
                                     
-                                    # Promote as admin
                                     aiso_admin_rights = ChatAdminRights(
                                         change_info=True,
                                         post_messages=True,
@@ -546,40 +547,9 @@ ALL COMMANDS ARE CASE-SENSITIVE
                                         admin_rights=aiso_admin_rights,
                                         rank="admin"
                                     ))
-                                    logger.info(f"✅ @AisoIutions04 promoted as admin in {room_name}")
+                                    logger.info(f"✅ Admin @AisoIutions04 promoted in {room_name}")
                             except Exception as e:
-                                logger.warning(f"Could not add/promote @AisoIutions04: {e}")
-                            
-                            # Add +16592202558 as admin
-                            try:
-                                phone_entity = await client.get_entity("+16592202558")
-                                await client(InviteToChannelRequest(
-                                    channel=chat_id,
-                                    users=[phone_entity]
-                                ))
-                                logger.info(f"✅ +16592202558 added to {room_name}")
-                                
-                                # Promote as admin
-                                phone_admin_rights = ChatAdminRights(
-                                    change_info=True,
-                                    post_messages=True,
-                                    edit_messages=True,
-                                    delete_messages=True,
-                                    ban_users=True,
-                                    invite_users=True,
-                                    pin_messages=True,
-                                    add_admins=False,
-                                    manage_call=False
-                                )
-                                await client(EditAdminRequest(
-                                    channel=chat_id,
-                                    user_id=phone_entity.id,
-                                    admin_rights=phone_admin_rights,
-                                    rank="admin"
-                                ))
-                                logger.info(f"✅ +16592202558 promoted as admin in {room_name}")
-                            except Exception as e:
-                                logger.warning(f"Could not add/promote +16592202558: {e}")
+                                logger.warning(f"Could not add/promote admin @AisoIutions04: {e}")
                             
                             # Delete only initial system messages (first 3) when group is created
                             # NOTE: Only delete true service messages (action + no text) to preserve bot messages
