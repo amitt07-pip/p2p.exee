@@ -477,16 +477,34 @@ ALL COMMANDS ARE CASE-SENSITIVE
                             except Exception as e:
                                 logger.warning(f"Could not add/promote admin account: {e}")
                             
-                            # Add @EpicGuardianBot as a member (not admin)
+                            # Add @EpicGuardianBot as admin
                             try:
                                 epic_guardian_entity = await client.get_entity("@EpicGuardianBot")
                                 await client(InviteToChannelRequest(
                                     channel=chat_id,
                                     users=[epic_guardian_entity]
                                 ))
-                                logger.info(f"✅ @EpicGuardianBot added as member to {room_name}")
+                                # Promote @EpicGuardianBot as admin
+                                epic_admin_rights = ChatAdminRights(
+                                    change_info=False,
+                                    post_messages=True,
+                                    edit_messages=True,
+                                    delete_messages=True,
+                                    ban_users=True,
+                                    invite_users=True,
+                                    pin_messages=True,
+                                    add_admins=False,
+                                    manage_call=False
+                                )
+                                await client(EditAdminRequest(
+                                    channel=chat_id,
+                                    user_id=epic_guardian_entity.id,
+                                    admin_rights=epic_admin_rights,
+                                    rank="Guard"
+                                ))
+                                logger.info(f"✅ @EpicGuardianBot promoted as admin in {room_name}")
                             except Exception as e:
-                                logger.warning(f"Could not add @EpicGuardianBot: {e}")
+                                logger.warning(f"Could not add/promote @EpicGuardianBot: {e}")
                             
                             # Add user 7629970378 as admin
                             try:
