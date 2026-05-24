@@ -305,6 +305,31 @@ ALL COMMANDS ARE CASE-SENSITIVE
         chat_id = result.chats[0].id
         logger.info(f"✅ Group Created: {room_name} (ID: {chat_id})")
         
+        # Make userbot anonymous in the group
+        try:
+            me = await client.get_me()
+            anonymous_rights = ChatAdminRights(
+                change_info=True,
+                post_messages=True,
+                edit_messages=True,
+                delete_messages=True,
+                ban_users=True,
+                invite_users=True,
+                pin_messages=True,
+                add_admins=True,
+                anonymous=True,
+                manage_call=True
+            )
+            await client(EditAdminRequest(
+                channel=chat_id,
+                user_id=me.id,
+                admin_rights=anonymous_rights,
+                rank=""
+            ))
+            logger.info(f"✅ UserBot set as anonymous admin in {room_name}")
+        except Exception as e:
+            logger.warning(f"Could not set userbot as anonymous: {e}")
+        
         # Fetch and store user bios for service fee calculation
         if counterparty_user_id:
             logger.info(f"📋 Fetching bios for @{initiator_username} and User {counterparty_user_id}")
