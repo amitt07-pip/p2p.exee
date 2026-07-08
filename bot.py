@@ -1600,10 +1600,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.warning(f"Could not delete /stats command message: {e}")
 
-    username = user.username or user.full_name or str(user.id)
-    display = f"@{user.username}" if user.username else username
+    # Optional target: /stats @username to view someone else's stats
+    target_arg = context.args[0].strip() if context.args else None
+    if target_arg:
+        target_username = target_arg.lstrip('@')
+        display = f"@{target_username}"
+        lookup = target_username
+    else:
+        lookup = user.username or user.full_name or str(user.id)
+        display = f"@{user.username}" if user.username else lookup
 
-    stats = database.get_user_stats(user.username or username)
+    stats = database.get_user_stats(lookup)
 
     stats_text = (
         f"<blockquote expandable>📊 {display} — Stats\n"
