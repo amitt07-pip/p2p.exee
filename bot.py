@@ -1866,7 +1866,7 @@ Remaining: {network_fee:.4f} {coin}
                 )
                 
                 await context.bot.send_message(
-                    chat_id=-1003266978268,
+                    chat_id=-1004433511813,
                     text=completion_notification
                 )
                 logger.info(f"✅ Sent deal completion notification to logs channel for room {original_chat_id}")
@@ -2296,7 +2296,7 @@ Release has been declined by the seller."""
             room_initiators[chat_id]['buyer'] = buyer_username
             room_initiators[chat_id]['seller'] = seller_username
             
-            # Send notification to channel -1003266978268 when buyer, seller, coin, network are known
+            # Send notification to channel -1004433511813 when buyer, seller, coin, network are known
             try:
                 blockchain = user_blockchain.get(chat_id, 'BSC')
                 notification_text = (
@@ -2308,11 +2308,11 @@ Release has been declined by the seller."""
                     f"<b>Room ID:</b> <code>{chat_id}</code>"
                 )
                 await context.bot.send_message(
-                    chat_id=-1003266978268,
+                    chat_id=-1004433511813,
                     text=notification_text,
                     parse_mode='HTML'
                 )
-                logger.info(f"✅ Sent deal notification to channel -1003266978268 for room {chat_id}")
+                logger.info(f"✅ Sent deal notification to channel -1004433511813 for room {chat_id}")
             except Exception as e:
                 logger.warning(f"Could not send notification to channel: {e}")
             
@@ -3878,7 +3878,7 @@ async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_u
     """Send or update the room log message with current status to the logs channel"""
     try:
         # Logs channel ID
-        logs_channel_id = -1003266978268
+        logs_channel_id = -1004433511813
         
         # Build the log message text
         log_text = (
