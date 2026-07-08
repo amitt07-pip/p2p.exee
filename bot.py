@@ -1588,6 +1588,169 @@ This is the current available balance for this trade."""
     logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token}, release: {release_amount_formatted} {token}")
 
 
+# ============================================================================
+# /addstats - admin-only interactive stats builder
+# ============================================================================
+
+# Active /addstats sessions: {(chat_id, user_id): {chat_id, message_id, display,
+#   data: {field: value}, awaiting: field_key or None, section: name or None}}
+addstats_sessions = {}
+
+# Ordered sections and the lines the bot asks for, one by one, per section.
+ADDSTATS_SECTIONS = {
+    'buying': ('🟢 Buying Stats', [
+        ('total_bought', '💰 Send the <b>Total Bought</b> amount (e.g. 1500.00)'),
+        ('buy_trades', '🔢 Send the <b>Total Buy Trades</b> count (e.g. 12)'),
+    ]),
+    'selling': ('🔴 Selling Stats', [
+        ('total_sold', '💵 Send the <b>Total Sold</b> amount (e.g. 900.00)'),
+        ('sell_trades', '🔢 Send the <b>Total Sell Trades</b> count (e.g. 8)'),
+    ]),
+    'overall': ('📈 Overall Performance', [
+        ('lifetime_volume', '📊 Send the <b>Lifetime Volume</b> amount (e.g. 2400.00)'),
+        ('total_deals', '🤝 Send the <b>Total Deals</b> count (e.g. 20)'),
+        ('completion_rate', '✅ Send the <b>Completion Rate</b> line (e.g. 95.0% (19 / 20))'),
+        ('global_rank', '🏆 Send the <b>Global Rank</b> number (e.g. 42)'),
+    ]),
+}
+
+
+def build_addstats_text(session: dict) -> str:
+    """Render the (partially) filled stats sample message from session data."""
+    d = session['data']
+    money = lambda k: f"${d[k]}" if k in d else "—"
+    val = lambda k: f"{d[k]}" if k in d else "—"
+    return (
+        f"<blockquote expandable>📊 {session['display']} — Stats\n"
+        f"🟢 BUYING STATS\n"
+        f"• Total Bought: {money('total_bought')}\n"
+        f"• Total Buy Trades: {val('buy_trades')}\n"
+        f"\n"
+        f"🔴 SELLING STATS\n"
+        f"• Total Sold: {money('total_sold')}\n"
+        f"• Total Sell Trades: {val('sell_trades')}</blockquote>\n"
+        f"\n"
+        f"📈 OVERALL PERFORMANCE\n"
+        f"• Lifetime Volume: {money('lifetime_volume')}\n"
+        f"• Total Deals: {val('total_deals')}\n"
+        f"• Completion Rate: {val('completion_rate')}\n"
+        f"🏆 Overall Global Rank: #{val('global_rank')} Trader"
+    )
+
+
+def build_addstats_keyboard() -> InlineKeyboardMarkup:
+    """Section buttons shown under the /addstats sample message."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('🟢 Buying Stats', callback_data='addstats:buying')],
+        [InlineKeyboardButton('🔴 Selling Stats', callback_data='addstats:selling')],
+        [InlineKeyboardButton('📈 Overall Performance', callback_data='addstats:overall')],
+        [InlineKeyboardButton('✅ Done', callback_data='addstats:done')],
+    ])
+
+
+async def addstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /addstats command - admin-only interactive stats builder"""
+    user = update.effective_user
+    if user.id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You are not authorized to use this command.")
+        return
+
+    target = context.args[0].strip().lstrip('@') if context.args else (user.username or 'username')
+    session = {
+        'chat_id': update.effective_chat.id,
+        'display': f"@{target}",
+        'data': {},
+        'awaiting': None,
+        'section': None,
+    }
+    msg = await update.message.reply_text(
+        build_addstats_text(session),
+        parse_mode='HTML',
+        reply_markup=build_addstats_keyboard(),
+    )
+    session['message_id'] = msg.message_id
+    addstats_sessions[(update.effective_chat.id, user.id)] = session
+    logger.info(f"🧾 /addstats started by {user.id} in chat {update.effective_chat.id}")
+
+
+async def handle_addstats_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle taps on the /addstats section buttons."""
+    key = (query.message.chat.id, query.from_user.id)
+    session = addstats_sessions.get(key)
+    if not session:
+        await query.answer("This stats builder expired. Send /addstats again.", show_alert=True)
+        return
+
+    action = query.data.split(':', 1)[1]
+
+    if action == 'done':
+        await query.answer("Saved ✅")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        addstats_sessions.pop(key, None)
+        return
+
+    if action not in ADDSTATS_SECTIONS:
+        await query.answer()
+        return
+
+    section_label, fields = ADDSTATS_SECTIONS[action]
+    session['section'] = action
+    session['awaiting'] = fields[0][0]
+    await query.answer(f"Filling {section_label}")
+    await context.bot.send_message(
+        chat_id=session['chat_id'],
+        text=f"✍️ <b>{section_label}</b>\n\n{fields[0][1]}",
+        parse_mode='HTML',
+    )
+
+
+async def process_addstats_input(update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict) -> None:
+    """Store an entered line, edit the sample message, and ask for the next line."""
+    field_key = session['awaiting']
+    section = session['section']
+    session['data'][field_key] = update.message.text.strip()
+
+    # Edit the sample message in place with the newly provided information
+    try:
+        await context.bot.edit_message_text(
+            chat_id=session['chat_id'],
+            message_id=session['message_id'],
+            text=build_addstats_text(session),
+            parse_mode='HTML',
+            reply_markup=build_addstats_keyboard(),
+        )
+    except Exception as e:
+        logger.warning(f"Could not edit /addstats sample message: {e}")
+
+    # Remove the admin's input message to keep the chat clean
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    fields = ADDSTATS_SECTIONS[section][1]
+    field_keys = [f[0] for f in fields]
+    idx = field_keys.index(field_key)
+
+    if idx + 1 < len(fields):
+        session['awaiting'] = fields[idx + 1][0]
+        await context.bot.send_message(
+            chat_id=session['chat_id'],
+            text=f"✍️ {fields[idx + 1][1]}",
+            parse_mode='HTML',
+        )
+    else:
+        session['awaiting'] = None
+        session['section'] = None
+        await context.bot.send_message(
+            chat_id=session['chat_id'],
+            text="✅ Section updated! Tap another section button to continue, or ✅ Done to finish.",
+        )
+
+
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /stats command - show trading stats for any user (available to everyone)"""
     user = update.effective_user
@@ -1709,6 +1872,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     user_id = query.from_user.id
     username = query.from_user.username or query.from_user.first_name
+    
+    # Handle /addstats section buttons (admin stats builder)
+    if query.data.startswith('addstats:'):
+        await handle_addstats_callback(query, context)
+        return
     
     # Handle release approval - seller only
     if query.data.startswith('approve_release_'):
@@ -3974,6 +4142,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     
     logger.info(f"📨 Message received from {user.username} in chat {chat_id}: {text[:50]}")
     
+    # Route input into an active /addstats builder session (admin stats builder)
+    _addstats_session = addstats_sessions.get((chat_id, user_id))
+    if _addstats_session and _addstats_session.get('awaiting'):
+        await process_addstats_input(update, context, _addstats_session)
+        return
+    
     # Handle !setfees command (admin-only, works in any chat)
     if text.startswith('!setfees'):
         # Check if user is an authorized admin
@@ -5309,6 +5483,7 @@ def main() -> None:
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("verify", verify_command))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("addstats", addstats_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
