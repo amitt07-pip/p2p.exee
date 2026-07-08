@@ -600,6 +600,110 @@ def get_deals_by_user(username: str) -> List[Dict[str, Any]]:
         return []
 
 
+def get_user_stats(username: str) -> Dict[str, Any]:
+    """
+    Compute trading stats for a user (matched by username as buyer or seller).
+
+    Returns a dict with buying/selling totals, lifetime volume, total/completed
+    deal counts, completion rate, and the user's global rank by lifetime volume.
+    Amounts are denominated in USDT (treated as USD). Falls back to all-zero
+    stats if the database is unavailable.
+    """
+    stats = {
+        'total_bought': 0.0,
+        'buy_trades': 0,
+        'total_sold': 0.0,
+        'sell_trades': 0,
+        'lifetime_volume': 0.0,
+        'total_deals': 0,
+        'completed_deals': 0,
+        'completion_rate': 0.0,
+        'global_rank': 0,
+    }
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return stats
+
+        cur = conn.cursor()
+
+        # Buying stats (completed deals where user is buyer)
+        cur.execute("""
+            SELECT COUNT(*), COALESCE(SUM(amount), 0)
+            FROM deals
+            WHERE LOWER(buyer_username) = LOWER(%s) AND deal_status = %s
+        """, (username, DEAL_STATUS_COMPLETED))
+        buy_count, buy_sum = cur.fetchone()
+
+        # Selling stats (completed deals where user is seller)
+        cur.execute("""
+            SELECT COUNT(*), COALESCE(SUM(amount), 0)
+            FROM deals
+            WHERE LOWER(seller_username) = LOWER(%s) AND deal_status = %s
+        """, (username, DEAL_STATUS_COMPLETED))
+        sell_count, sell_sum = cur.fetchone()
+
+        # All deals involving the user (any status) and completed count
+        cur.execute("""
+            SELECT
+                COUNT(*),
+                COUNT(*) FILTER (WHERE deal_status = %s)
+            FROM deals
+            WHERE LOWER(buyer_username) = LOWER(%s) OR LOWER(seller_username) = LOWER(%s)
+        """, (DEAL_STATUS_COMPLETED, username, username))
+        total_deals, completed_deals = cur.fetchone()
+
+        # Global rank: number of users with strictly higher lifetime volume + 1
+        cur.execute("""
+            WITH volumes AS (
+                SELECT username, SUM(amt) AS volume FROM (
+                    SELECT LOWER(buyer_username) AS username, amount AS amt
+                    FROM deals
+                    WHERE deal_status = %(status)s AND buyer_username IS NOT NULL
+                    UNION ALL
+                    SELECT LOWER(seller_username) AS username, amount AS amt
+                    FROM deals
+                    WHERE deal_status = %(status)s AND seller_username IS NOT NULL
+                ) t
+                GROUP BY username
+            )
+            SELECT COUNT(*) + 1
+            FROM volumes
+            WHERE volume > (
+                SELECT COALESCE(SUM(volume), 0)
+                FROM volumes
+                WHERE username = LOWER(%(username)s)
+            )
+        """, {'status': DEAL_STATUS_COMPLETED, 'username': username})
+        rank_row = cur.fetchone()
+        global_rank = int(rank_row[0]) if rank_row else 0
+
+        cur.close()
+        conn.close()
+
+        total_bought = float(buy_sum or 0)
+        total_sold = float(sell_sum or 0)
+        total_deals = int(total_deals or 0)
+        completed_deals = int(completed_deals or 0)
+
+        stats.update({
+            'total_bought': total_bought,
+            'buy_trades': int(buy_count or 0),
+            'total_sold': total_sold,
+            'sell_trades': int(sell_count or 0),
+            'lifetime_volume': total_bought + total_sold,
+            'total_deals': total_deals,
+            'completed_deals': completed_deals,
+            'completion_rate': (completed_deals / total_deals * 100) if total_deals else 0.0,
+            'global_rank': global_rank,
+        })
+        return stats
+    except Exception as e:
+        logger.warning(f"Could not get user stats: {e}")
+        return stats
+
+
 def delete_deal(chat_id: int) -> bool:
     """Delete a deal record (use with caution)"""
     try:

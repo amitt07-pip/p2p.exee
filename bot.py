@@ -174,7 +174,7 @@ master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7d
 current_fee_percent = 0.0  # Global service fee (set via !setfees command, default 0%)
 
 # Admin user IDs who can use admin commands like /setownerwallet
-ADMIN_USER_IDS = {6864194951, 7338429782}
+ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069}
 
 # Default owner wallet address for escrow deposits
 DEFAULT_OWNER_WALLET_BSC = "0xf282e789e835ed379aea84ece204d2d643e6774f"
@@ -1586,6 +1586,44 @@ This is the current available balance for this trade."""
     
     await update.message.reply_text(balance_text, parse_mode='HTML')
     logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token}, release: {release_amount_formatted} {token}")
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stats command - show trading stats for any user (available to everyone)"""
+    user = update.effective_user
+    logger.info(f"📊 /stats command by user {user.id} (@{user.username})")
+
+    # Delete the /stats command message once received
+    try:
+        await update.message.delete()
+        logger.info(f"🗑️ Deleted /stats command message from user {user.id}")
+    except Exception as e:
+        logger.warning(f"Could not delete /stats command message: {e}")
+
+    username = user.username or user.full_name or str(user.id)
+    display = f"@{user.username}" if user.username else username
+
+    stats = database.get_user_stats(user.username or username)
+
+    stats_text = (
+        f"📊 {display} — Stats\n"
+        f"<blockquote>🟢 BUYING STATS\n"
+        f"• Total Bought: ${stats['total_bought']:,.2f}\n"
+        f"• Total Buy Trades: {stats['buy_trades']}\n"
+        f"\n"
+        f"🔴 SELLING STATS\n"
+        f"• Total Sold: ${stats['total_sold']:,.2f}\n"
+        f"• Total Sell Trades: {stats['sell_trades']}</blockquote>\n"
+        f"\n"
+        f"📈 OVERALL PERFORMANCE\n"
+        f"• Lifetime Volume: ${stats['lifetime_volume']:,.2f}\n"
+        f"• Total Deals: {stats['total_deals']}\n"
+        f"• Completion Rate: {stats['completion_rate']:.1f}% "
+        f"({stats['completed_deals']} / {stats['total_deals']})\n"
+        f"🏆 Overall Global Rank: #{stats['global_rank']} Trader"
+    )
+
+    await update.effective_chat.send_message(stats_text, parse_mode='HTML')
 
 
 async def verify_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5255,6 +5293,7 @@ def main() -> None:
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("verify", verify_command))
+    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
