@@ -1593,6 +1593,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     logger.info(f"📊 /stats command by user {user.id} (@{user.username})")
 
+    # Capture the replied-to user (if any) before deleting the command message
+    replied_user = None
+    if update.message and update.message.reply_to_message:
+        replied_user = update.message.reply_to_message.from_user
+
     # Delete the /stats command message once received
     try:
         await update.message.delete()
@@ -1600,12 +1605,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.warning(f"Could not delete /stats command message: {e}")
 
-    # Optional target: /stats @username to view someone else's stats
+    # Target resolution order: /stats @username  >  reply to a message  >  caller
     target_arg = context.args[0].strip() if context.args else None
     if target_arg:
         target_username = target_arg.lstrip('@')
         display = f"@{target_username}"
         lookup = target_username
+    elif replied_user:
+        lookup = replied_user.username or replied_user.full_name or str(replied_user.id)
+        display = f"@{replied_user.username}" if replied_user.username else lookup
     else:
         lookup = user.username or user.full_name or str(user.id)
         display = f"@{user.username}" if user.username else lookup
