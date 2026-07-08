@@ -1607,12 +1607,62 @@ ADDSTATS_SECTIONS = {
         ('sell_trades', '🔢 Send the <b>Total Sell Trades</b> count (e.g. 8)'),
     ]),
     'overall': ('📈 Overall Performance', [
-        ('lifetime_volume', '📊 Send the <b>Lifetime Volume</b> amount (e.g. 2400.00)'),
         ('total_deals', '🤝 Send the <b>Total Deals</b> count (e.g. 20)'),
-        ('completion_rate', '✅ Send the <b>Completion Rate</b> line (e.g. 95.0% (19 / 20))'),
+        ('completion_rate', '✅ Send the <b>Completion Rate</b> as done/total (e.g. 19/20) — I\'ll add the %'),
         ('global_rank', '🏆 Send the <b>Global Rank</b> number (e.g. 42)'),
     ]),
 }
+# Lifetime Volume is auto-computed (Total Bought + Total Sold), so it is never asked.
+
+
+# Fields rendered as money ($, 2 decimals) vs whole-number counts.
+ADDSTATS_MONEY_FIELDS = {'total_bought', 'total_sold', 'lifetime_volume'}
+ADDSTATS_INT_FIELDS = {'buy_trades', 'sell_trades', 'total_deals', 'global_rank'}
+
+
+def _money_to_float(value) -> float:
+    """Parse a display money/number string (e.g. '1,234.00') back to a float."""
+    try:
+        return float(str(value).replace(',', '').replace('$', '').strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def _format_completion_rate(raw: str) -> str:
+    """'19/20' -> '95.0% (19 / 20)'. Leaves any other input untouched."""
+    m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*$', raw)
+    if not m:
+        return raw
+    done, total = float(m.group(1)), float(m.group(2))
+    pct = (done / total * 100) if total else 0.0
+    done_s = int(done) if done == int(done) else done
+    total_s = int(total) if total == int(total) else total
+    return f"{pct:.1f}% ({done_s} / {total_s})"
+
+
+def _format_addstats_value(field_key: str, raw: str) -> str:
+    """Normalize a typed value: money -> 1,234.00, counts -> 1,234, completion -> pct. Free-form on parse failure."""
+    if field_key == 'completion_rate':
+        return _format_completion_rate(raw)
+    cleaned = raw.replace(',', '').replace('$', '').strip()
+    if field_key in ADDSTATS_MONEY_FIELDS:
+        try:
+            return f"{float(cleaned):,.2f}"
+        except ValueError:
+            return raw
+    if field_key in ADDSTATS_INT_FIELDS:
+        try:
+            return f"{int(float(cleaned)):,}"
+        except ValueError:
+            return raw
+    return raw
+
+
+def _addstats_lifetime(d: dict):
+    """Auto lifetime volume = Total Bought + Total Sold; '—' until either is set."""
+    if 'total_bought' not in d and 'total_sold' not in d:
+        return None
+    return f"{_money_to_float(d.get('total_bought')) + _money_to_float(d.get('total_sold')):,.2f}"
 
 
 def build_addstats_text(session: dict) -> str:
@@ -1620,6 +1670,8 @@ def build_addstats_text(session: dict) -> str:
     d = session['data']
     money = lambda k: f"${d[k]}" if k in d else "—"
     val = lambda k: f"{d[k]}" if k in d else "—"
+    lifetime = _addstats_lifetime(d)
+    lifetime_str = f"${lifetime}" if lifetime is not None else "—"
     return (
         f"<blockquote expandable>📊 {session['display']} — Stats\n"
         f"🟢 BUYING STATS\n"
@@ -1631,11 +1683,53 @@ def build_addstats_text(session: dict) -> str:
         f"• Total Sell Trades: {val('sell_trades')}</blockquote>\n"
         f"\n"
         f"📈 OVERALL PERFORMANCE\n"
-        f"• Lifetime Volume: {money('lifetime_volume')}\n"
+        f"• Lifetime Volume: {lifetime_str}\n"
         f"• Total Deals: {val('total_deals')}\n"
         f"• Completion Rate: {val('completion_rate')}\n"
         f"🏆 Overall Global Rank: #{val('global_rank')} Trader"
     )
+
+
+def build_stats_from_manual(display: str, m: dict) -> str:
+    """Render a finalized stats message from persisted manual stats (empty -> zero defaults)."""
+    money = lambda k: m.get(k) or "0.00"
+    num = lambda k: m.get(k) or "0"
+    return (
+        f"<blockquote expandable>📊 {display} — Stats\n"
+        f"🟢 BUYING STATS\n"
+        f"• Total Bought: ${money('total_bought')}\n"
+        f"• Total Buy Trades: {num('buy_trades')}\n"
+        f"\n"
+        f"🔴 SELLING STATS\n"
+        f"• Total Sold: ${money('total_sold')}\n"
+        f"• Total Sell Trades: {num('sell_trades')}</blockquote>\n"
+        f"\n"
+        f"📈 OVERALL PERFORMANCE\n"
+        f"• Lifetime Volume: ${money('lifetime_volume')}\n"
+        f"• Total Deals: {num('total_deals')}\n"
+        f"• Completion Rate: {m.get('completion_rate') or '0.0% (0 / 0)'}\n"
+        f"🏆 Overall Global Rank: #{num('global_rank')} Trader"
+    )
+
+
+def _addstats_save_data(session: dict) -> dict:
+    """Build the dict persisted to manual_stats, including auto lifetime volume."""
+    d = session['data']
+    save = {k: d.get(k, '') for k in (
+        'total_bought', 'buy_trades', 'total_sold', 'sell_trades',
+        'total_deals', 'completion_rate', 'global_rank',
+    )}
+    lifetime = _addstats_lifetime(d)
+    save['lifetime_volume'] = lifetime if lifetime is not None else ''
+    return save
+
+
+def _persist_addstats(session: dict) -> None:
+    """Save the current session's stats to the DB if we know the target user id."""
+    target_id = session.get('target_user_id')
+    if not target_id:
+        return
+    database.save_manual_stats(target_id, session.get('target_username'), _addstats_save_data(session))
 
 
 def build_addstats_keyboard() -> InlineKeyboardMarkup:
@@ -1655,13 +1749,43 @@ async def addstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("❌ You are not authorized to use this command.")
         return
 
-    target = context.args[0].strip().lstrip('@') if context.args else (user.username or 'username')
+    # Resolve the target user id + username. Stats are stored per Telegram user id.
+    # Priority: reply to a message  >  /addstats @username | <user_id>  >  the admin themself.
+    target_user_id = None
+    target_username = None
+    replied = update.message.reply_to_message.from_user if (update.message and update.message.reply_to_message) else None
+    if replied:
+        target_user_id = replied.id
+        target_username = replied.username
+    elif context.args:
+        arg = context.args[0].strip()
+        if arg.lstrip('-').isdigit():
+            target_user_id = int(arg)
+        else:
+            target_username = arg.lstrip('@')
+            target_user_id = database.get_user_id_by_username(target_username)
+    else:
+        target_user_id = user.id
+        target_username = user.username
+
+    display = f"@{target_username}" if target_username else (f"ID {target_user_id}" if target_user_id else "@username")
+
+    # Prefill from any previously-saved stats for this user so edits build on them.
+    existing = database.get_manual_stats(target_user_id) if target_user_id else None
+    data = {}
+    if existing:
+        for k in ('total_bought', 'buy_trades', 'total_sold', 'sell_trades', 'total_deals', 'completion_rate', 'global_rank'):
+            if existing.get(k):
+                data[k] = existing[k]
+
     session = {
         'chat_id': update.effective_chat.id,
-        'display': f"@{target}",
-        'data': {},
+        'display': display,
+        'data': data,
         'awaiting': None,
         'section': None,
+        'target_user_id': target_user_id,
+        'target_username': target_username,
     }
     msg = await update.message.reply_text(
         build_addstats_text(session),
@@ -1670,7 +1794,14 @@ async def addstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     session['message_id'] = msg.message_id
     addstats_sessions[(update.effective_chat.id, user.id)] = session
-    logger.info(f"🧾 /addstats started by {user.id} in chat {update.effective_chat.id}")
+    logger.info(f"🧾 /addstats started by {user.id} for target {target_user_id} (@{target_username}) in chat {update.effective_chat.id}")
+
+    if not target_user_id:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=("⚠️ I don't know this user's Telegram id yet, so these stats won't show in /stats. "
+                  "Reply to one of their messages with /addstats, or pass their numeric id."),
+        )
 
 
 async def handle_addstats_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1684,6 +1815,7 @@ async def handle_addstats_callback(query, context: ContextTypes.DEFAULT_TYPE) ->
     action = query.data.split(':', 1)[1]
 
     if action == 'done':
+        _persist_addstats(session)
         await query.answer("Saved ✅")
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -1711,7 +1843,7 @@ async def process_addstats_input(update: Update, context: ContextTypes.DEFAULT_T
     """Store an entered line, edit the sample message, and ask for the next line."""
     field_key = session['awaiting']
     section = session['section']
-    session['data'][field_key] = update.message.text.strip()
+    session['data'][field_key] = _format_addstats_value(field_key, update.message.text.strip())
 
     # Edit the sample message in place with the newly provided information
     try:
@@ -1724,6 +1856,9 @@ async def process_addstats_input(update: Update, context: ContextTypes.DEFAULT_T
         )
     except Exception as e:
         logger.warning(f"Could not edit /addstats sample message: {e}")
+
+    # Persist after each entered line so stats survive even without tapping Done
+    _persist_addstats(session)
 
     # Remove the admin's input message to keep the chat clean
     try:
@@ -1770,36 +1905,44 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Target resolution order: /stats @username  >  reply to a message  >  caller
     target_arg = context.args[0].strip() if context.args else None
+    target_user_id = None
     if target_arg:
         target_username = target_arg.lstrip('@')
         display = f"@{target_username}"
         lookup = target_username
+        target_user_id = database.get_user_id_by_username(target_username)
     elif replied_user:
         lookup = replied_user.username or replied_user.full_name or str(replied_user.id)
         display = f"@{replied_user.username}" if replied_user.username else lookup
+        target_user_id = replied_user.id
     else:
         lookup = user.username or user.full_name or str(user.id)
         display = f"@{user.username}" if user.username else lookup
+        target_user_id = user.id
 
-    stats = database.get_user_stats(lookup)
-
-    stats_text = (
-        f"<blockquote expandable>📊 {display} — Stats\n"
-        f"🟢 BUYING STATS\n"
-        f"• Total Bought: ${stats['total_bought']:,.2f}\n"
-        f"• Total Buy Trades: {stats['buy_trades']}\n"
-        f"\n"
-        f"🔴 SELLING STATS\n"
-        f"• Total Sold: ${stats['total_sold']:,.2f}\n"
-        f"• Total Sell Trades: {stats['sell_trades']}</blockquote>\n"
-        f"\n"
-        f"📈 OVERALL PERFORMANCE\n"
-        f"• Lifetime Volume: ${stats['lifetime_volume']:,.2f}\n"
-        f"• Total Deals: {stats['total_deals']}\n"
-        f"• Completion Rate: {stats['completion_rate']:.1f}% "
-        f"({stats['completed_deals']} / {stats['total_deals']})\n"
-        f"🏆 Overall Global Rank: #{stats['global_rank']} Trader"
-    )
+    # Manually-set stats (via /addstats) take priority over computed deal stats
+    manual = database.get_manual_stats(target_user_id) if target_user_id else None
+    if manual:
+        stats_text = build_stats_from_manual(display, manual)
+    else:
+        stats = database.get_user_stats(lookup)
+        stats_text = (
+            f"<blockquote expandable>📊 {display} — Stats\n"
+            f"🟢 BUYING STATS\n"
+            f"• Total Bought: ${stats['total_bought']:,.2f}\n"
+            f"• Total Buy Trades: {stats['buy_trades']}\n"
+            f"\n"
+            f"🔴 SELLING STATS\n"
+            f"• Total Sold: ${stats['total_sold']:,.2f}\n"
+            f"• Total Sell Trades: {stats['sell_trades']}</blockquote>\n"
+            f"\n"
+            f"📈 OVERALL PERFORMANCE\n"
+            f"• Lifetime Volume: ${stats['lifetime_volume']:,.2f}\n"
+            f"• Total Deals: {stats['total_deals']}\n"
+            f"• Completion Rate: {stats['completion_rate']:.1f}% "
+            f"({stats['completed_deals']} / {stats['total_deals']})\n"
+            f"🏆 Overall Global Rank: #{stats['global_rank']} Trader"
+        )
 
     await update.effective_chat.send_message(stats_text, parse_mode='HTML')
 

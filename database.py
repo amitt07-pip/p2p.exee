@@ -165,6 +165,31 @@ def init_database():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_deals_buyer ON deals(buyer_username)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_deals_seller ON deals(seller_username)")
         
+        # Username -> user_id mapping (used to resolve @username for /stats & /addstats).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_ids (
+                username TEXT PRIMARY KEY,
+                user_id BIGINT
+            )
+        """)
+        
+        # Manually-set stats (via /addstats), keyed by Telegram user id.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS manual_stats (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                total_bought TEXT,
+                buy_trades TEXT,
+                total_sold TEXT,
+                sell_trades TEXT,
+                lifetime_volume TEXT,
+                total_deals TEXT,
+                completion_rate TEXT,
+                global_rank TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -702,6 +727,92 @@ def get_user_stats(username: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Could not get user stats: {e}")
         return stats
+
+
+MANUAL_STATS_FIELDS = [
+    'total_bought', 'buy_trades', 'total_sold', 'sell_trades',
+    'lifetime_volume', 'total_deals', 'completion_rate', 'global_rank',
+]
+
+
+def get_user_id_by_username(username: str) -> Optional[int]:
+    """Resolve a Telegram user id from a stored username (user_ids table)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM user_ids WHERE LOWER(username) = LOWER(%s)", (username,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return int(row[0]) if row and row[0] is not None else None
+    except Exception as e:
+        logger.warning(f"Could not resolve user id for @{username}: {e}")
+        return None
+
+
+def save_manual_stats(user_id: int, username: Optional[str], data: Dict[str, str]) -> bool:
+    """Upsert manually-set stats (from /addstats) for a user id. Values are display strings."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO manual_stats (
+                user_id, username, total_bought, buy_trades, total_sold, sell_trades,
+                lifetime_volume, total_deals, completion_rate, global_rank, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                total_bought = EXCLUDED.total_bought,
+                buy_trades = EXCLUDED.buy_trades,
+                total_sold = EXCLUDED.total_sold,
+                sell_trades = EXCLUDED.sell_trades,
+                lifetime_volume = EXCLUDED.lifetime_volume,
+                total_deals = EXCLUDED.total_deals,
+                completion_rate = EXCLUDED.completion_rate,
+                global_rank = EXCLUDED.global_rank,
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            user_id, username,
+            data.get('total_bought'), data.get('buy_trades'),
+            data.get('total_sold'), data.get('sell_trades'),
+            data.get('lifetime_volume'), data.get('total_deals'),
+            data.get('completion_rate'), data.get('global_rank'),
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Could not save manual stats for {user_id}: {e}")
+        return False
+
+
+def get_manual_stats(user_id: int) -> Optional[Dict[str, str]]:
+    """Return manually-set stats for a user id as display strings, or None if none set."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT total_bought, buy_trades, total_sold, sell_trades,
+                   lifetime_volume, total_deals, completion_rate, global_rank
+            FROM manual_stats WHERE user_id = %s
+        """, (user_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return None
+        result = {field: (row[i] if row[i] is not None else '') for i, field in enumerate(MANUAL_STATS_FIELDS)}
+        return result
+    except Exception as e:
+        logger.warning(f"Could not get manual stats for {user_id}: {e}")
+        return None
 
 
 def delete_deal(chat_id: int) -> bool:
