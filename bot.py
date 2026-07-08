@@ -1606,7 +1606,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     stats = database.get_user_stats(user.username or username)
 
     stats_text = (
-        f"<blockquote>📊 {display} — Stats\n"
+        f"<blockquote expandable>📊 {display} — Stats\n"
         f"🟢 BUYING STATS\n"
         f"• Total Bought: ${stats['total_bought']:,.2f}\n"
         f"• Total Buy Trades: {stats['buy_trades']}\n"
