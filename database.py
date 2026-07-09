@@ -625,6 +625,43 @@ def get_deals_by_user(username: str) -> List[Dict[str, Any]]:
         return []
 
 
+def get_active_deal_by_address_for_user(address: str, user_id: int = None, username: str = None) -> Optional[Dict[str, Any]]:
+    """
+    Find the most recent active deal whose escrow address matches, narrowed to a
+    specific participant (by user id or username). Used by /verify to show which
+    room a shared escrow address belongs to for the requesting user.
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT * FROM deals
+            WHERE LOWER(escrow_address) = LOWER(%s)
+              AND deal_status NOT IN (%s, %s, %s)
+              AND (
+                    (%s IS NOT NULL AND (buyer_user_id = %s OR seller_user_id = %s))
+                 OR (%s IS NOT NULL AND (LOWER(buyer_username) = LOWER(%s) OR LOWER(seller_username) = LOWER(%s)))
+              )
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (
+            address,
+            DEAL_STATUS_COMPLETED, DEAL_STATUS_CANCELLED, DEAL_STATUS_EXPIRED,
+            user_id, user_id, user_id,
+            username, username, username,
+        ))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.warning(f"Could not find active deal by address for user: {e}")
+        return None
+
+
 def get_user_stats(username: str) -> Dict[str, Any]:
     """
     Compute trading stats for a user (matched by username as buyer or seller).
