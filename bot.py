@@ -2016,6 +2016,62 @@ Chain: {info['chain']}"""
         logger.warning(f"⚠️ Address NOT verified for user {user.id}: {address_to_verify}")
 
 
+async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /close command - admin only. Marks the deal closed then permanently deletes the group."""
+    user = update.effective_user
+
+    # Silently ignore unauthorized users
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    chat_id = update.effective_chat.id
+
+    # Resolve the deal chat_id (state key). Prefer an explicit numeric argument,
+    # otherwise use the room this command was run in.
+    original_chat_id = None
+    if context.args and context.args[0].strip().lstrip('-').isdigit():
+        arg = int(context.args[0].strip())
+        original_chat_id = abs(arg) - 1000000000000 if arg < 0 else arg
+    elif chat_id < 0:
+        original_chat_id = abs(chat_id) - 1000000000000
+    else:
+        await update.message.reply_text(
+            "❌ Run /close inside the deal room, or use /close <room_chat_id>."
+        )
+        return
+
+    send_chat_id = -1000000000000 - original_chat_id
+
+    deal = database.get_deal(original_chat_id)
+    room_name = (deal.get('room_name') if deal else None) or f"Room {original_chat_id}"
+
+    # Step 1: mark the deal closed
+    database.cancel_deal(original_chat_id)
+    logger.info(f"🔒 Admin {user.id} closed deal {original_chat_id} ({room_name})")
+
+    # Notify the room that it's being closed
+    try:
+        await context.bot.send_message(
+            chat_id=send_chat_id,
+            text="🔒 <b>Deal closed by admin.</b>\n\nThis group will now be deleted.",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.warning(f"Could not send close notification to room {original_chat_id}: {e}")
+
+    # Clean up in-memory state for this room
+    disclaimer_sent.discard(original_chat_id)
+    role_selection_sent.discard(original_chat_id)
+    processed_rooms.discard(original_chat_id)
+    rooms_waiting_for_requests.discard(original_chat_id)
+    for state in (room_awaiting_hash, room_transaction_state, user_roles, approvals, release_approvals):
+        state.pop(original_chat_id, None)
+
+    # Step 2: request the userbot to permanently delete the group
+    write_delete_request(original_chat_id, room_name)
+    logger.info(f"🗑️ Requested permanent deletion of group {room_name} (chat_id: {original_chat_id})")
+
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle button presses"""
     query = update.callback_query
@@ -5634,6 +5690,7 @@ def main() -> None:
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("verify", verify_command))
+    application.add_handler(CommandHandler("close", close_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("addstats", addstats_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
