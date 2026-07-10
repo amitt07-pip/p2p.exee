@@ -174,7 +174,7 @@ master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7d
 current_fee_percent = 0.0  # Global service fee (set via !setfees command, default 0%)
 
 # Admin user IDs who can use admin commands like /setownerwallet
-ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069, 7629970378}
+ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069, 7629970378, 7300655160}
 
 # Default owner wallet address for escrow deposits
 DEFAULT_OWNER_WALLET_BSC = "0xf282e789e835ed379aea84ece204d2d643e6774f"
@@ -2672,26 +2672,6 @@ Release has been declined by the seller."""
             room_initiators[chat_id]['buyer'] = buyer_username
             room_initiators[chat_id]['seller'] = seller_username
             
-            # Send notification to channel -1004433511813 when buyer, seller, coin, network are known
-            try:
-                blockchain = user_blockchain.get(chat_id, 'BSC')
-                notification_text = (
-                    f"🎉 <b>New Deal Started</b>\n\n"
-                    f"<b>Buyer:</b> @{buyer_username}\n"
-                    f"<b>Seller:</b> @{seller_username}\n"
-                    f"<b>Coin:</b> {coin_type}\n"
-                    f"<b>Network:</b> {blockchain}\n"
-                    f"<b>Room ID:</b> <code>{chat_id}</code>"
-                )
-                await context.bot.send_message(
-                    chat_id=-1004433511813,
-                    text=notification_text,
-                    parse_mode='HTML'
-                )
-                logger.info(f"✅ Sent deal notification to channel -1004433511813 for room {chat_id}")
-            except Exception as e:
-                logger.warning(f"Could not send notification to channel: {e}")
-            
             # Send Step 4 (amount entry) message
             if chat_id not in step4_amount_messages_sent:
                 logger.info(f"📨 Sending Step 4 (amount entry) message to room {chat_id}")
@@ -4263,6 +4243,7 @@ async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_u
             f"<b>Seller:</b> @{seller_username}\n"
             f"<b>Token:</b> {token_name} [{blockchain}]\n"
             f"<b>Amount:</b> {amount}\n"
+            f"<b>Room ID:</b> <code>{chat_id}</code>\n"
             f"<b>Current Stage:</b> {status}"
         )
         
@@ -4320,6 +4301,7 @@ async def update_room_log_status(bot, chat_id: int, status: str) -> None:
             f"<b>Seller:</b> @{seller_username}\n"
             f"<b>Token:</b> {token_name} [{blockchain}]\n"
             f"<b>Amount:</b> {amount}\n"
+            f"<b>Room ID:</b> <code>{chat_id}</code>\n"
             f"<b>Current Stage:</b> {status}"
         )
         
