@@ -174,7 +174,7 @@ master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7d
 current_fee_percent = 0.0  # Global service fee (set via !setfees command, default 0%)
 
 # Admin user IDs who can use admin commands like /setownerwallet
-ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069}
+ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069, 7629970378}
 
 # Default owner wallet address for escrow deposits
 DEFAULT_OWNER_WALLET_BSC = "0xf282e789e835ed379aea84ece204d2d643e6774f"
