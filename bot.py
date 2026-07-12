@@ -177,6 +177,16 @@ current_fee_percent = 0.0  # Global service fee (set via !setfees command, defau
 # Admin user IDs who can use admin commands like /setownerwallet
 ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069, 7629970378, 7300655160}
 
+# Premium (custom) emoji ids provided by the owner. Rendered via the HTML
+# <tg-emoji> tag; clients without access to the emoji show the fallback char.
+PREMIUM_EMOJI_STAR = "5395444784611480792"
+PREMIUM_EMOJI_USER = "6300827421071378088"
+
+
+def premium_emoji(emoji_id: str, fallback: str) -> str:
+    """Wrap a fallback emoji in a Telegram custom-emoji tag (HTML parse mode)."""
+    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
+
 # Default owner wallet address for escrow deposits
 DEFAULT_OWNER_WALLET_BSC = "0xf282e789e835ed379aea84ece204d2d643e6774f"
 DEFAULT_OWNER_WALLET_TRON = "T0000000000000000000000000000000000"  # Placeholder for TRON
@@ -1871,12 +1881,15 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("ℹ️ No added members recorded yet.")
         return
 
+    star = premium_emoji(PREMIUM_EMOJI_STAR, "📋")
+    user_e = premium_emoji(PREMIUM_EMOJI_USER, "👤")
+
     rows = []
     for g in groups:
         adder_name = f"@{g['added_by_username']}" if g['added_by_username'] else "user"
         count = len(g['members'])
         header = (
-            f"👤 <b>{adder_name}</b>  <code>{g['added_by']}</code>\n"
+            f"{user_e} <b>{adder_name}</b>  <code>{g['added_by']}</code>\n"
             f"   <i>added {count} member{'s' if count != 1 else ''}</i>"
         )
         member_lines = []
@@ -1886,7 +1899,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             member_lines.append(f"   {branch} <b>{m_name}</b>  <code>{m['id']}</code>")
         rows.append(header + "\n" + "\n".join(member_lines))
 
-    text = "📋 <b><u>Added Members</u></b>\n\n" + "\n\n".join(rows)
+    text = f"{star} <b><u>Added Members</u></b>\n\n" + "\n\n".join(rows)
     await update.message.reply_text(text, parse_mode='HTML')
 
 
@@ -5099,7 +5112,8 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
                 if actor and actor.id in ADMIN_USER_IDS and actor.id != user_id:
                     actor_name = f"@{actor.username}" if actor.username else (actor.first_name or "user")
                     actor_display = f"{actor_name} (<code>{actor.id}</code>)"
-                    log_text = f"{member_display} has been added by {actor_display} in the P2P ROOM group."
+                    star = premium_emoji(PREMIUM_EMOJI_STAR, "✅")
+                    log_text = f"{star} {member_display} has been added by {actor_display} in the P2P ROOM group."
                     try:
                         msg = await context.bot.send_message(
                             chat_id=-1004433511813,
