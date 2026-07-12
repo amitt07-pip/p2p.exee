@@ -1903,6 +1903,73 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(text, parse_mode='HTML')
 
 
+def _resolve_user_token(token: str):
+    """Resolve '@username' | 'username' | '<user_id>' to (user_id_or_None, username_or_None)."""
+    t = token.lstrip('@').strip()
+    if t.lstrip('-').isdigit():
+        return int(t), None
+    return database.get_user_id_by_username(t), t
+
+
+async def a_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /a command - admins manually record an added member for /list.
+
+    /a @member @adder   -> record that @member was added by @adder
+    /a @member          -> adder defaults to the command sender
+    /a (reply)          -> member is the replied-to user, adder defaults to sender
+    Numeric user ids are accepted in place of @username.
+    """
+    user = update.effective_user
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    args = context.args or []
+    replied = update.message.reply_to_message.from_user if (update.message and update.message.reply_to_message) else None
+
+    # Resolve the member (who was added) and the adder token (who added them)
+    if replied:
+        member_id = replied.id
+        member_username = replied.username
+        adder_token = args[0] if args else None
+    else:
+        if not args:
+            await update.message.reply_text(
+                "❌ Usage: /a @member [@adder]  — or reply to the member's message with /a.\n"
+                "You can also pass numeric user ids."
+            )
+            return
+        member_id, member_username = _resolve_user_token(args[0])
+        adder_token = args[1] if len(args) > 1 else None
+
+    if not member_id:
+        await update.message.reply_text(
+            "⚠️ I don't know that user's Telegram id yet. Reply to their message with /a, "
+            "or pass their numeric id: /a <member_id> [adder_id]."
+        )
+        return
+
+    # Resolve the adder (defaults to the command sender)
+    if adder_token:
+        adder_id, adder_username = _resolve_user_token(adder_token)
+        if not adder_id:
+            await update.message.reply_text(
+                "⚠️ I don't know the adder's Telegram id yet. Pass their numeric id as the second value."
+            )
+            return
+    else:
+        adder_id = user.id
+        adder_username = user.username
+
+    database.record_added_member(member_id, member_username, adder_id, adder_username)
+    m_disp = f"@{member_username}" if member_username else f"id {member_id}"
+    a_disp = f"@{adder_username}" if adder_username else f"id {adder_id}"
+    await update.message.reply_text(
+        f"✅ Recorded: {m_disp} (<code>{member_id}</code>) added by {a_disp} (<code>{adder_id}</code>).",
+        parse_mode='HTML',
+    )
+    logger.info(f"📝 /a by {user.id}: member {member_id} added by {adder_id}")
+
+
 async def handle_addstats_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle taps on the /addstats section buttons."""
     key = (query.message.chat.id, query.from_user.id)
@@ -5850,6 +5917,7 @@ def main() -> None:
     application.add_handler(CommandHandler("addstats", addstats_command))
     application.add_handler(CommandHandler("addadmin", addadmin_command))
     application.add_handler(CommandHandler("list", list_command))
+    application.add_handler(CommandHandler("a", a_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
