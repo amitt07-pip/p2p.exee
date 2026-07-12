@@ -170,6 +170,7 @@ room_awaiting_hash = {}  # Track which rooms are awaiting transaction hash: {cha
 room_creation_times = {}  # Track when each room was created for time calculation: {chat_id: timestamp}
 room_confirmed_deposits = {}  # Track confirmed deposits: {chat_id: amount}
 room_log_messages = {}  # Track room log message IDs: {chat_id: {'msg_id': int, 'chat_id': int}}
+added_member_log_messages = {}  # Track "added by admin" log messages: {(chat_id, user_id): {'msg_id': int, 'text': str}}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
 current_fee_percent = 0.0  # Global service fee (set via !setfees command, default 0%)
 
@@ -1804,6 +1805,50 @@ async def addstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 
+async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /addadmin command - admins add other bot admins (persisted)."""
+    user = update.effective_user
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    # Resolve target: reply to a message  >  /addadmin @username | <user_id>.
+    target_user_id = None
+    target_username = None
+    replied = update.message.reply_to_message.from_user if (update.message and update.message.reply_to_message) else None
+    if replied:
+        target_user_id = replied.id
+        target_username = replied.username
+    elif context.args:
+        arg = context.args[0].strip()
+        if arg.lstrip('-').isdigit():
+            target_user_id = int(arg)
+        else:
+            target_username = arg.lstrip('@')
+            target_user_id = database.get_user_id_by_username(target_username)
+    else:
+        await update.message.reply_text(
+            "❌ Usage: reply to a user with /addadmin, or /addadmin @username | <user_id>."
+        )
+        return
+
+    if not target_user_id:
+        await update.message.reply_text(
+            "⚠️ I don't know that user's Telegram id yet. Reply to one of their messages "
+            "with /addadmin, or pass their numeric id."
+        )
+        return
+
+    if target_user_id in ADMIN_USER_IDS:
+        await update.message.reply_text("ℹ️ That user is already an admin.")
+        return
+
+    ADMIN_USER_IDS.add(target_user_id)
+    database.add_bot_admin(target_user_id, target_username, user.id)
+    display = f"@{target_username}" if target_username else f"id {target_user_id}"
+    await update.message.reply_text(f"✅ {display} (<code>{target_user_id}</code>) is now a bot admin.", parse_mode='HTML')
+    logger.info(f"👑 Admin {user.id} added new admin {target_user_id} (@{target_username})")
+
+
 async def handle_addstats_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle taps on the /addstats section buttons."""
     key = (query.message.chat.id, query.from_user.id)
@@ -1925,7 +1970,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if manual:
         stats_text = build_stats_from_manual(display, manual)
     else:
-        stats = database.get_user_stats(lookup)
+        # Prefer computing by Telegram user id (can't be hijacked via username theft);
+        # fall back to username matching only when the id is unknown.
+        if target_user_id:
+            stats = database.get_user_stats_by_id(target_user_id)
+        else:
+            stats = database.get_user_stats(lookup)
         stats_text = (
             f"<blockquote expandable>📊 {display} — Stats\n"
             f"🟢 BUYING STATS\n"
@@ -4977,13 +5027,49 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
             
             logger.info(f"👤 User @{username} (ID: {user_id}) status changed in chat (positive: {positive_chat_id}): {old_status} -> {new_status}")
             
+            # Who performed this membership change (the actor)
+            actor = update.chat_member.from_user
+            member_name = f"@{username}" if username else (user.first_name or "user")
+            member_display = f"{member_name} (<code>{user_id}</code>)"
+
             # A user joined the chat
-            if new_status == "member" and old_status != "member":
+            if new_status == "member" and old_status not in ("member", "administrator", "creator"):
                 logger.info(f"✅ @{username} joined chat {positive_chat_id}")
                 
                 # Track user ID for username
                 if username:
                     save_user_id(username, user_id)
+
+                # If an admin added this member, log it to the logs channel
+                if actor and actor.id in ADMIN_USER_IDS and actor.id != user_id:
+                    actor_name = f"@{actor.username}" if actor.username else (actor.first_name or "user")
+                    actor_display = f"{actor_name} (<code>{actor.id}</code>)"
+                    log_text = f"{member_display} has been added by {actor_display} in the P2P ROOM group."
+                    try:
+                        msg = await context.bot.send_message(
+                            chat_id=-1004433511813,
+                            text=log_text,
+                            parse_mode='HTML',
+                        )
+                        added_member_log_messages[(chat.id, user_id)] = {'msg_id': msg.message_id, 'text': log_text}
+                        logger.info(f"📝 Logged admin-added member {member_display} by {actor_display}")
+                    except Exception as e:
+                        logger.warning(f"Could not send added-member log: {e}")
+
+            # A member left / was kicked / banned -> strikethrough the original log message
+            elif new_status in ("left", "kicked") and old_status in ("member", "administrator", "creator", "restricted"):
+                entry = added_member_log_messages.get((chat.id, user_id))
+                if entry:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=-1004433511813,
+                            message_id=entry['msg_id'],
+                            text=f"<s>{entry['text']}</s>",
+                            parse_mode='HTML',
+                        )
+                        logger.info(f"✏️ Struck through added-member log for {member_display}")
+                    except Exception as e:
+                        logger.warning(f"Could not strikethrough added-member log: {e}")
     except Exception as e:
         logger.warning(f"Error handling user chat member update: {e}")
 
@@ -5675,9 +5761,10 @@ def main() -> None:
     application.add_handler(CommandHandler("close", close_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("addstats", addstats_command))
+    application.add_handler(CommandHandler("addadmin", addadmin_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
-    application.add_handler(ChatMemberHandler(handle_chat_member_update))
-    application.add_handler(ChatMemberHandler(handle_user_chat_member_update))
+    application.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
+    application.add_handler(ChatMemberHandler(handle_user_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
@@ -5686,6 +5773,14 @@ def main() -> None:
     
     # Initialize deals database table
     database.init_database()
+    
+    # Load persisted bot admins (added via /addadmin) into the in-memory set
+    try:
+        for admin_id in database.get_bot_admin_ids():
+            ADMIN_USER_IDS.add(admin_id)
+        logger.info(f"✅ Loaded {len(ADMIN_USER_IDS)} bot admins")
+    except Exception as e:
+        logger.warning(f"Could not load persisted bot admins: {e}")
     
     # Initialize owner wallet settings table and load from database
     init_owner_wallet_table()

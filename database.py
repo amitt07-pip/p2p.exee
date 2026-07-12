@@ -190,6 +190,16 @@ def init_database():
             )
         """)
         
+        # Bot admins added at runtime via /addadmin (persisted across restarts).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                added_by BIGINT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -766,6 +776,107 @@ def get_user_stats(username: str) -> Dict[str, Any]:
         return stats
 
 
+def get_user_stats_by_id(user_id: int) -> Dict[str, Any]:
+    """
+    Compute trading stats for a user matched by Telegram user id (buyer_user_id /
+    seller_user_id). Preferred over get_user_stats() so stats can't be hijacked by
+    someone taking over a username. Falls back to all-zero stats on error.
+    """
+    stats = {
+        'total_bought': 0.0,
+        'buy_trades': 0,
+        'total_sold': 0.0,
+        'sell_trades': 0,
+        'lifetime_volume': 0.0,
+        'total_deals': 0,
+        'completed_deals': 0,
+        'completion_rate': 0.0,
+        'global_rank': 0,
+    }
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return stats
+
+        cur = conn.cursor()
+
+        # Buying stats (completed deals where user is buyer)
+        cur.execute("""
+            SELECT COUNT(*), COALESCE(SUM(amount), 0)
+            FROM deals
+            WHERE buyer_user_id = %s AND deal_status = %s
+        """, (user_id, DEAL_STATUS_COMPLETED))
+        buy_count, buy_sum = cur.fetchone()
+
+        # Selling stats (completed deals where user is seller)
+        cur.execute("""
+            SELECT COUNT(*), COALESCE(SUM(amount), 0)
+            FROM deals
+            WHERE seller_user_id = %s AND deal_status = %s
+        """, (user_id, DEAL_STATUS_COMPLETED))
+        sell_count, sell_sum = cur.fetchone()
+
+        # All deals involving the user (any status) and completed count
+        cur.execute("""
+            SELECT
+                COUNT(*),
+                COUNT(*) FILTER (WHERE deal_status = %s)
+            FROM deals
+            WHERE buyer_user_id = %s OR seller_user_id = %s
+        """, (DEAL_STATUS_COMPLETED, user_id, user_id))
+        total_deals, completed_deals = cur.fetchone()
+
+        # Global rank: number of users (by id) with strictly higher lifetime volume + 1
+        cur.execute("""
+            WITH volumes AS (
+                SELECT uid, SUM(amt) AS volume FROM (
+                    SELECT buyer_user_id AS uid, amount AS amt
+                    FROM deals
+                    WHERE deal_status = %(status)s AND buyer_user_id IS NOT NULL
+                    UNION ALL
+                    SELECT seller_user_id AS uid, amount AS amt
+                    FROM deals
+                    WHERE deal_status = %(status)s AND seller_user_id IS NOT NULL
+                ) t
+                GROUP BY uid
+            )
+            SELECT COUNT(*) + 1
+            FROM volumes
+            WHERE volume > (
+                SELECT COALESCE(SUM(volume), 0)
+                FROM volumes
+                WHERE uid = %(uid)s
+            )
+        """, {'status': DEAL_STATUS_COMPLETED, 'uid': user_id})
+        rank_row = cur.fetchone()
+        global_rank = int(rank_row[0]) if rank_row else 0
+
+        cur.close()
+        conn.close()
+
+        total_bought = float(buy_sum or 0)
+        total_sold = float(sell_sum or 0)
+        total_deals = int(total_deals or 0)
+        completed_deals = int(completed_deals or 0)
+
+        stats.update({
+            'total_bought': total_bought,
+            'buy_trades': int(buy_count or 0),
+            'total_sold': total_sold,
+            'sell_trades': int(sell_count or 0),
+            'lifetime_volume': total_bought + total_sold,
+            'total_deals': total_deals,
+            'completed_deals': completed_deals,
+            'completion_rate': (completed_deals / total_deals * 100) if total_deals else 0.0,
+            'global_rank': global_rank,
+        })
+        return stats
+    except Exception as e:
+        logger.warning(f"Could not get user stats by id: {e}")
+        return stats
+
+
 MANUAL_STATS_FIELDS = [
     'total_bought', 'buy_trades', 'total_sold', 'sell_trades',
     'lifetime_volume', 'total_deals', 'completion_rate', 'global_rank',
@@ -850,6 +961,46 @@ def get_manual_stats(user_id: int) -> Optional[Dict[str, str]]:
     except Exception as e:
         logger.warning(f"Could not get manual stats for {user_id}: {e}")
         return None
+
+
+def add_bot_admin(user_id: int, username: Optional[str], added_by: Optional[int]) -> bool:
+    """Persist a bot admin id (via /addadmin). Upserts username/added_by."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO bot_admins (user_id, username, added_by, added_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = COALESCE(EXCLUDED.username, bot_admins.username),
+                added_by = COALESCE(EXCLUDED.added_by, bot_admins.added_by)
+        """, (user_id, username, added_by))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Could not add bot admin {user_id}: {e}")
+        return False
+
+
+def get_bot_admin_ids() -> List[int]:
+    """Return all persisted bot admin ids."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM bot_admins")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [int(r[0]) for r in rows if r and r[0] is not None]
+    except Exception as e:
+        logger.warning(f"Could not get bot admin ids: {e}")
+        return []
 
 
 def delete_deal(chat_id: int) -> bool:
