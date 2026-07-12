@@ -1866,7 +1866,7 @@ async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ADMIN_USER_IDS.add(target_user_id)
     database.add_bot_admin(target_user_id, target_username, user.id)
     display = f"@{target_username}" if target_username else f"id {target_user_id}"
-    await update.message.reply_text(f"✅ {display} (<code>{target_user_id}</code>) is now a bot admin.", parse_mode='HTML')
+    await update.message.reply_text(f"✅ {display} [<code>{target_user_id}</code>] is now a bot admin.", parse_mode='HTML')
     logger.info(f"👑 Admin {user.id} added new admin {target_user_id} (@{target_username})")
 
 
@@ -1886,17 +1886,19 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     rows = []
     for g in groups:
-        adder_name = f"@{g['added_by_username']}" if g['added_by_username'] else "user"
+        adder_uname = g['added_by_username'] or database.get_username_by_user_id(g['added_by'])
+        adder_name = f"@{adder_uname}" if adder_uname else "user"
         count = len(g['members'])
         header = (
-            f"{user_e} <b>{adder_name}</b>  <code>{g['added_by']}</code>\n"
+            f"{user_e} <b>{adder_name}</b>  [<code>{g['added_by']}</code>]\n"
             f"   <i>added {count} member{'s' if count != 1 else ''}</i>"
         )
         member_lines = []
         for i, m in enumerate(g['members']):
             branch = "┗" if i == len(g['members']) - 1 else "┣"
-            m_name = f"@{m['username']}" if m['username'] else "user"
-            member_lines.append(f"   {branch} <b>{m_name}</b>  <code>{m['id']}</code>")
+            m_uname = m['username'] or database.get_username_by_user_id(m['id'])
+            m_name = f"@{m_uname}" if m_uname else "user"
+            member_lines.append(f"   {branch} <b>{m_name}</b>  [<code>{m['id']}</code>]")
         rows.append(header + "\n" + "\n".join(member_lines))
 
     text = f"{star} <b><u>Added Members</u></b>\n\n" + "\n\n".join(rows)
@@ -1960,11 +1962,13 @@ async def a_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         adder_id = user.id
         adder_username = user.username
 
+    member_username = member_username or database.get_username_by_user_id(member_id)
+    adder_username = adder_username or database.get_username_by_user_id(adder_id)
     database.record_added_member(member_id, member_username, adder_id, adder_username)
-    m_disp = f"@{member_username}" if member_username else f"id {member_id}"
-    a_disp = f"@{adder_username}" if adder_username else f"id {adder_id}"
+    m_disp = f"@{member_username}" if member_username else "user"
+    a_disp = f"@{adder_username}" if adder_username else "user"
     await update.message.reply_text(
-        f"✅ Recorded: {m_disp} (<code>{member_id}</code>) added by {a_disp} (<code>{adder_id}</code>).",
+        f"✅ Recorded: {m_disp} [<code>{member_id}</code>] added by {a_disp} [<code>{adder_id}</code>].",
         parse_mode='HTML',
     )
     logger.info(f"📝 /a by {user.id}: member {member_id} added by {adder_id}")
@@ -5161,7 +5165,7 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
             # Who performed this membership change (the actor)
             actor = update.chat_member.from_user
             member_name = f"@{username}" if username else (user.first_name or "user")
-            member_display = f"{member_name} (<code>{user_id}</code>)"
+            member_display = f"{member_name} [<code>{user_id}</code>]"
 
             # A user joined the chat
             if new_status == "member" and old_status not in ("member", "administrator", "creator"):
@@ -5178,7 +5182,7 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
                 # If an admin added this member, log it to the logs channel
                 if actor and actor.id in ADMIN_USER_IDS and actor.id != user_id:
                     actor_name = f"@{actor.username}" if actor.username else (actor.first_name or "user")
-                    actor_display = f"{actor_name} (<code>{actor.id}</code>)"
+                    actor_display = f"{actor_name} [<code>{actor.id}</code>]"
                     star = premium_emoji(PREMIUM_EMOJI_STAR, "✅")
                     log_text = f"{star} {member_display} has been added by {actor_display} in the P2P ROOM group."
                     try:
@@ -5195,7 +5199,7 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
                 # A non-admin added this member -> warn in the logs channel
                 elif actor and actor.id not in ADMIN_USER_IDS and actor.id != user_id:
                     actor_name = f"@{actor.username}" if actor.username else (actor.first_name or "user")
-                    actor_display = f"{actor_name} (<code>{actor.id}</code>)"
+                    actor_display = f"{actor_name} [<code>{actor.id}</code>]"
                     warn_text = (
                         f"⚠️ <b>WARNING:</b> {member_display} was added by {actor_display}, "
                         f"who is <b>NOT</b> an admin, in the P2P ROOM group."

@@ -911,6 +911,23 @@ def get_user_id_by_username(username: str) -> Optional[int]:
         return None
 
 
+def get_username_by_user_id(user_id: int) -> Optional[str]:
+    """Resolve a stored username from a Telegram user id (user_ids table)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+        cur = conn.cursor()
+        cur.execute("SELECT username FROM user_ids WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row[0] if row and row[0] else None
+    except Exception as e:
+        logger.warning(f"Could not resolve username for id {user_id}: {e}")
+        return None
+
+
 def save_manual_stats(user_id: int, username: Optional[str], data: Dict[str, str]) -> bool:
     """Upsert manually-set stats (from /addstats) for a user id. Values are display strings."""
     try:
