@@ -5056,6 +5056,24 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
                     except Exception as e:
                         logger.warning(f"Could not send added-member log: {e}")
 
+                # A non-admin added this member -> warn in the logs channel
+                elif actor and actor.id not in ADMIN_USER_IDS and actor.id != user_id:
+                    actor_name = f"@{actor.username}" if actor.username else (actor.first_name or "user")
+                    actor_display = f"{actor_name} (<code>{actor.id}</code>)"
+                    warn_text = (
+                        f"⚠️ <b>WARNING:</b> {member_display} was added by {actor_display}, "
+                        f"who is <b>NOT</b> an admin, in the P2P ROOM group."
+                    )
+                    try:
+                        await context.bot.send_message(
+                            chat_id=-1004433511813,
+                            text=warn_text,
+                            parse_mode='HTML',
+                        )
+                        logger.info(f"⚠️ Logged non-admin add: {member_display} by {actor_display}")
+                    except Exception as e:
+                        logger.warning(f"Could not send non-admin add warning: {e}")
+
             # A member left / was kicked / banned -> strikethrough the original log message
             elif new_status in ("left", "kicked") and old_status in ("member", "administrator", "creator", "restricted"):
                 entry = added_member_log_messages.get((chat.id, user_id))
