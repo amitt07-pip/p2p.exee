@@ -1608,12 +1608,12 @@ ADDSTATS_SECTIONS = {
         ('sell_trades', '🔢 Send the <b>Total Sell Trades</b> count (e.g. 8)'),
     ]),
     'overall': ('📈 Overall Performance', [
-        ('total_deals', '🤝 Send the <b>Total Deals</b> count (e.g. 20)'),
         ('completion_rate', '✅ Send the <b>Completion Rate</b> as done/total (e.g. 19/20) — I\'ll add the %'),
         ('global_rank', '🏆 Send the <b>Global Rank</b> number (e.g. 42)'),
     ]),
 }
-# Lifetime Volume is auto-computed (Total Bought + Total Sold), so it is never asked.
+# Lifetime Volume (Total Bought + Total Sold) and Total Deals (Buy + Sell Trades)
+# are auto-computed, so they are never asked.
 
 
 # Fields rendered as money ($, 2 decimals) vs whole-number counts.
@@ -1666,6 +1666,13 @@ def _addstats_lifetime(d: dict):
     return f"{_money_to_float(d.get('total_bought')) + _money_to_float(d.get('total_sold')):,.2f}"
 
 
+def _addstats_total_deals(d: dict):
+    """Auto total deals = Total Buy Trades + Total Sell Trades; '—' until either is set."""
+    if 'buy_trades' not in d and 'sell_trades' not in d:
+        return None
+    return f"{int(_money_to_float(d.get('buy_trades')) + _money_to_float(d.get('sell_trades'))):,}"
+
+
 def build_addstats_text(session: dict) -> str:
     """Render the (partially) filled stats sample message from session data."""
     d = session['data']
@@ -1673,6 +1680,8 @@ def build_addstats_text(session: dict) -> str:
     val = lambda k: f"{d[k]}" if k in d else "—"
     lifetime = _addstats_lifetime(d)
     lifetime_str = f"${lifetime}" if lifetime is not None else "—"
+    total_deals = _addstats_total_deals(d)
+    total_deals_str = f"{total_deals}" if total_deals is not None else "—"
     return (
         f"<blockquote expandable>📊 {session['display']} — Stats\n"
         f"🟢 BUYING STATS\n"
@@ -1685,7 +1694,7 @@ def build_addstats_text(session: dict) -> str:
         f"\n"
         f"📈 OVERALL PERFORMANCE\n"
         f"• Lifetime Volume: {lifetime_str}\n"
-        f"• Total Deals: {val('total_deals')}\n"
+        f"• Total Deals: {total_deals_str}\n"
         f"• Completion Rate: {val('completion_rate')}\n"
         f"🏆 Overall Global Rank: #{val('global_rank')} Trader"
     )
@@ -1718,10 +1727,12 @@ def _addstats_save_data(session: dict) -> dict:
     d = session['data']
     save = {k: d.get(k, '') for k in (
         'total_bought', 'buy_trades', 'total_sold', 'sell_trades',
-        'total_deals', 'completion_rate', 'global_rank',
+        'completion_rate', 'global_rank',
     )}
     lifetime = _addstats_lifetime(d)
     save['lifetime_volume'] = lifetime if lifetime is not None else ''
+    total_deals = _addstats_total_deals(d)
+    save['total_deals'] = total_deals if total_deals is not None else ''
     return save
 
 
@@ -1877,11 +1888,12 @@ async def handle_addstats_callback(query, context: ContextTypes.DEFAULT_TYPE) ->
     session['section'] = action
     session['awaiting'] = fields[0][0]
     await query.answer(f"Filling {section_label}")
-    await context.bot.send_message(
+    prompt = await context.bot.send_message(
         chat_id=session['chat_id'],
         text=f"✍️ <b>{section_label}</b>\n\n{fields[0][1]}",
         parse_mode='HTML',
     )
+    session['prompt_msg_id'] = prompt.message_id
 
 
 async def process_addstats_input(update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict) -> None:
@@ -1911,17 +1923,26 @@ async def process_addstats_input(update: Update, context: ContextTypes.DEFAULT_T
     except Exception:
         pass
 
+    # Remove the bot's prompt message now that we've received the response
+    prompt_msg_id = session.pop('prompt_msg_id', None)
+    if prompt_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=session['chat_id'], message_id=prompt_msg_id)
+        except Exception:
+            pass
+
     fields = ADDSTATS_SECTIONS[section][1]
     field_keys = [f[0] for f in fields]
     idx = field_keys.index(field_key)
 
     if idx + 1 < len(fields):
         session['awaiting'] = fields[idx + 1][0]
-        await context.bot.send_message(
+        prompt = await context.bot.send_message(
             chat_id=session['chat_id'],
             text=f"✍️ {fields[idx + 1][1]}",
             parse_mode='HTML',
         )
+        session['prompt_msg_id'] = prompt.message_id
     else:
         session['awaiting'] = None
         session['section'] = None
