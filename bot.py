@@ -1874,14 +1874,19 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     rows = []
     for g in groups:
         adder_name = f"@{g['added_by_username']}" if g['added_by_username'] else "user"
-        header = f"👤 <b>{adder_name}</b> (<code>{g['added_by']}</code>) added:"
+        count = len(g['members'])
+        header = (
+            f"👤 <b>{adder_name}</b>  <code>{g['added_by']}</code>\n"
+            f"   <i>added {count} member{'s' if count != 1 else ''}</i>"
+        )
         member_lines = []
-        for m in g['members']:
+        for i, m in enumerate(g['members']):
+            branch = "┗" if i == len(g['members']) - 1 else "┣"
             m_name = f"@{m['username']}" if m['username'] else "user"
-            member_lines.append(f"   • {m_name} (<code>{m['id']}</code>)")
+            member_lines.append(f"   {branch} <b>{m_name}</b>  <code>{m['id']}</code>")
         rows.append(header + "\n" + "\n".join(member_lines))
 
-    text = "📋 <b>Added Members</b>\n\n" + "\n\n".join(rows)
+    text = "📋 <b><u>Added Members</u></b>\n\n" + "\n\n".join(rows)
     await update.message.reply_text(text, parse_mode='HTML')
 
 
