@@ -200,6 +200,17 @@ def init_database():
             )
         """)
         
+        # Members added to groups, tracked with who added them (for /list).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS added_members (
+                member_id BIGINT PRIMARY KEY,
+                member_username TEXT,
+                added_by BIGINT,
+                added_by_username TEXT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -1000,6 +1011,69 @@ def get_bot_admin_ids() -> List[int]:
         return [int(r[0]) for r in rows if r and r[0] is not None]
     except Exception as e:
         logger.warning(f"Could not get bot admin ids: {e}")
+        return []
+
+
+def record_added_member(member_id: int, member_username: Optional[str],
+                        added_by: int, added_by_username: Optional[str]) -> bool:
+    """Record that a member was added to a group by someone (for /list)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO added_members (member_id, member_username, added_by, added_by_username, added_at)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (member_id) DO UPDATE SET
+                member_username = COALESCE(EXCLUDED.member_username, added_members.member_username),
+                added_by = EXCLUDED.added_by,
+                added_by_username = COALESCE(EXCLUDED.added_by_username, added_members.added_by_username),
+                added_at = CURRENT_TIMESTAMP
+        """, (member_id, member_username, added_by, added_by_username))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Could not record added member {member_id}: {e}")
+        return False
+
+
+def get_added_members_grouped() -> List[Dict[str, Any]]:
+    """
+    Return added members grouped by who added them, as a list of dicts:
+    [{'added_by': id, 'added_by_username': str, 'members': [{'id': int, 'username': str}, ...]}, ...]
+    Adders with no members are naturally excluded.
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT added_by, added_by_username, member_id, member_username
+            FROM added_members
+            ORDER BY added_by, added_at ASC
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        grouped: Dict[int, Dict[str, Any]] = {}
+        for added_by, added_by_username, member_id, member_username in rows:
+            if added_by is None:
+                continue
+            if added_by not in grouped:
+                grouped[added_by] = {
+                    'added_by': int(added_by),
+                    'added_by_username': added_by_username,
+                    'members': [],
+                }
+            grouped[added_by]['members'].append({'id': int(member_id), 'username': member_username})
+        return [g for g in grouped.values() if g['members']]
+    except Exception as e:
+        logger.warning(f"Could not get added members grouped: {e}")
         return []
 
 

@@ -1860,6 +1860,31 @@ async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     logger.info(f"👑 Admin {user.id} added new admin {target_user_id} (@{target_username})")
 
 
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /list command - admins see who added which members (grouped by adder)."""
+    user = update.effective_user
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    groups = database.get_added_members_grouped()
+    if not groups:
+        await update.message.reply_text("ℹ️ No added members recorded yet.")
+        return
+
+    rows = []
+    for g in groups:
+        adder_name = f"@{g['added_by_username']}" if g['added_by_username'] else "user"
+        header = f"👤 <b>{adder_name}</b> (<code>{g['added_by']}</code>) added:"
+        member_lines = []
+        for m in g['members']:
+            m_name = f"@{m['username']}" if m['username'] else "user"
+            member_lines.append(f"   • {m_name} (<code>{m['id']}</code>)")
+        rows.append(header + "\n" + "\n".join(member_lines))
+
+    text = "📋 <b>Added Members</b>\n\n" + "\n\n".join(rows)
+    await update.message.reply_text(text, parse_mode='HTML')
+
+
 async def handle_addstats_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle taps on the /addstats section buttons."""
     key = (query.message.chat.id, query.from_user.id)
@@ -5061,6 +5086,10 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
                 if username:
                     save_user_id(username, user_id)
 
+                # Record who added this member (for /list), when added by someone else
+                if actor and actor.id != user_id:
+                    database.record_added_member(user_id, username, actor.id, actor.username)
+
                 # If an admin added this member, log it to the logs channel
                 if actor and actor.id in ADMIN_USER_IDS and actor.id != user_id:
                     actor_name = f"@{actor.username}" if actor.username else (actor.first_name or "user")
@@ -5801,6 +5830,7 @@ def main() -> None:
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("addstats", addstats_command))
     application.add_handler(CommandHandler("addadmin", addadmin_command))
+    application.add_handler(CommandHandler("list", list_command))
     application.add_handler(ChatJoinRequestHandler(handle_chat_join_request))
     application.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(ChatMemberHandler(handle_user_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
