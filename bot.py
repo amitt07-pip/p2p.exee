@@ -1879,7 +1879,7 @@ async def _prune_departed_members(context: ContextTypes.DEFAULT_TYPE, groups: li
         for m in list(g['members']):
             try:
                 cm = await context.bot.get_chat_member(P2P_ROOM_GROUP_ID, m['id'])
-                if cm.status in ("left", "kicked"):
+                if cm.status in ("left", "kicked") or cm.user.is_bot:
                     database.remove_added_member(m['id'])
                     g['members'].remove(m)
             except Exception as e:
