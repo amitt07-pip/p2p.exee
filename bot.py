@@ -1907,15 +1907,26 @@ def build_list_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Update", callback_data="list:update")]])
 
 
+def _strip_custom_emoji(text: str) -> str:
+    """Replace <tg-emoji ...>X</tg-emoji> with its fallback X (for clients/bots without custom emoji)."""
+    return re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>', r'\1', text)
+
+
 async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /list command - admins see who added which members (grouped by adder)."""
     user = update.effective_user
     if user.id not in ADMIN_USER_IDS:
         return
 
-    await update.message.reply_text(
-        build_list_text(), parse_mode='HTML', reply_markup=build_list_keyboard()
-    )
+    text = build_list_text()
+    try:
+        await update.message.reply_text(text, parse_mode='HTML', reply_markup=build_list_keyboard())
+    except Exception as e:
+        # Custom emoji can be rejected if the bot can't use it; retry with plain fallback emoji
+        logger.info(f"/list send fell back to plain emoji: {e}")
+        await update.message.reply_text(
+            _strip_custom_emoji(text), parse_mode='HTML', reply_markup=build_list_keyboard()
+        )
 
 
 async def handle_list_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1923,14 +1934,25 @@ async def handle_list_callback(query, context: ContextTypes.DEFAULT_TYPE) -> Non
     if query.from_user.id not in ADMIN_USER_IDS:
         await query.answer("Admins only.", show_alert=True)
         return
-    await query.answer("Updated ✅")
+
+    text = build_list_text()
+    kb = build_list_keyboard()
     try:
-        await query.edit_message_text(
-            build_list_text(), parse_mode='HTML', reply_markup=build_list_keyboard()
-        )
+        await query.edit_message_text(text, parse_mode='HTML', reply_markup=kb)
+        await query.answer("Updated ✅")
     except Exception as e:
-        # Ignore "message is not modified" when nothing changed
-        logger.info(f"/list update: {e}")
+        msg = str(e).lower()
+        if "not modified" in msg:
+            await query.answer("No changes.")
+            return
+        # Custom emoji rejected or other HTML issue -> retry with plain fallback emoji
+        try:
+            await query.edit_message_text(_strip_custom_emoji(text), parse_mode='HTML', reply_markup=kb)
+            await query.answer("Updated ✅")
+        except Exception as e2:
+            m2 = str(e2).lower()
+            await query.answer("No changes." if "not modified" in m2 else "Couldn't update, try again.")
+            logger.warning(f"/list update failed: {e2}")
 
 
 def _resolve_user_token(token: str):
