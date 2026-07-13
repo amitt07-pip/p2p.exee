@@ -1057,6 +1057,23 @@ def record_added_member(member_id: int, member_username: Optional[str],
         return False
 
 
+def remove_added_member(member_id: int) -> bool:
+    """Remove an added-member record (e.g. when they leave / are kicked) so /list stays current."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        cur.execute("DELETE FROM added_members WHERE member_id = %s", (member_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Could not remove added member {member_id}: {e}")
+        return False
+
+
 def get_added_members_grouped() -> List[Dict[str, Any]]:
     """
     Return added members grouped by who added them, as a list of dicts:

@@ -182,6 +182,9 @@ ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069, 7629970378, 7300655160}
 PREMIUM_EMOJI_STAR = "5395444784611480792"
 PREMIUM_EMOJI_USER = "6300827421071378088"
 
+# The P2P ROOM group whose member add/leave events are tracked (/list) and logged.
+P2P_ROOM_GROUP_ID = -1004489418013
+
 
 def premium_emoji(emoji_id: str, fallback: str) -> str:
     """Wrap a fallback emoji in a Telegram custom-emoji tag (HTML parse mode)."""
@@ -5175,6 +5178,10 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
                 if username:
                     save_user_id(username, user_id)
 
+                # Only track/notify member changes for the designated P2P ROOM group
+                if chat.id != P2P_ROOM_GROUP_ID:
+                    return
+
                 # Record who added this member (for /list), when added by someone else
                 if actor and actor.id != user_id:
                     database.record_added_member(user_id, username, actor.id, actor.username)
@@ -5214,8 +5221,14 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
                     except Exception as e:
                         logger.warning(f"Could not send non-admin add warning: {e}")
 
-            # A member left / was kicked / banned -> strikethrough the original log message
+            # A member left / was kicked / banned -> remove from /list and strikethrough the log
             elif new_status in ("left", "kicked") and old_status in ("member", "administrator", "creator", "restricted"):
+                if chat.id != P2P_ROOM_GROUP_ID:
+                    return
+
+                # Drop them from /list
+                database.remove_added_member(user_id)
+
                 entry = added_member_log_messages.get((chat.id, user_id))
                 if entry:
                     try:
