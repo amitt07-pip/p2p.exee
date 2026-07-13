@@ -1873,19 +1873,14 @@ async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     logger.info(f"👑 Admin {user.id} added new admin {target_user_id} (@{target_username})")
 
 
-async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /list command - admins see who added which members (grouped by adder)."""
-    user = update.effective_user
-    if user.id not in ADMIN_USER_IDS:
-        return
+def build_list_text() -> str:
+    """Render the /list message from current added-member records."""
+    star = premium_emoji(PREMIUM_EMOJI_STAR, "📋")
+    user_e = premium_emoji(PREMIUM_EMOJI_USER, "👤")
 
     groups = database.get_added_members_grouped()
     if not groups:
-        await update.message.reply_text("ℹ️ No added members recorded yet.")
-        return
-
-    star = premium_emoji(PREMIUM_EMOJI_STAR, "📋")
-    user_e = premium_emoji(PREMIUM_EMOJI_USER, "👤")
+        return f"{star} <b><u>Added Members</u></b>\n\nℹ️ No added members recorded yet."
 
     rows = []
     for g in groups:
@@ -1904,8 +1899,38 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             member_lines.append(f"   {branch} <b>{m_name}</b>  [<code>{m['id']}</code>]")
         rows.append(header + "\n" + "\n".join(member_lines))
 
-    text = f"{star} <b><u>Added Members</u></b>\n\n" + "\n\n".join(rows)
-    await update.message.reply_text(text, parse_mode='HTML')
+    return f"{star} <b><u>Added Members</u></b>\n\n" + "\n\n".join(rows)
+
+
+def build_list_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard with an Update button for the /list message."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Update", callback_data="list:update")]])
+
+
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /list command - admins see who added which members (grouped by adder)."""
+    user = update.effective_user
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    await update.message.reply_text(
+        build_list_text(), parse_mode='HTML', reply_markup=build_list_keyboard()
+    )
+
+
+async def handle_list_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the Update button on the /list message."""
+    if query.from_user.id not in ADMIN_USER_IDS:
+        await query.answer("Admins only.", show_alert=True)
+        return
+    await query.answer("Updated ✅")
+    try:
+        await query.edit_message_text(
+            build_list_text(), parse_mode='HTML', reply_markup=build_list_keyboard()
+        )
+    except Exception as e:
+        # Ignore "message is not modified" when nothing changed
+        logger.info(f"/list update: {e}")
 
 
 def _resolve_user_token(token: str):
@@ -2272,6 +2297,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Handle /addstats section buttons (admin stats builder)
     if query.data.startswith('addstats:'):
         await handle_addstats_callback(query, context)
+        return
+
+    # Handle /list Update button
+    if query.data == 'list:update':
+        await handle_list_callback(query, context)
         return
     
     # Handle release approval - seller only
@@ -5182,8 +5212,9 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
                 if chat.id != P2P_ROOM_GROUP_ID:
                     return
 
-                # Record who added this member (for /list), when added by someone else
-                if actor and actor.id != user_id:
+                # Record who added this member (for /list), when added by someone else.
+                # Skip bots (including this bot itself) so they don't clutter the list.
+                if actor and actor.id != user_id and not user.is_bot:
                     database.record_added_member(user_id, username, actor.id, actor.username)
 
                 # If an admin added this member, log it to the logs channel
