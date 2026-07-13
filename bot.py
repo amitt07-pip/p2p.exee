@@ -1875,8 +1875,14 @@ async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def _prune_departed_members(context: ContextTypes.DEFAULT_TYPE, groups: list) -> None:
     """Drop members who are no longer in the P2P ROOM group (verified live via getChatMember)."""
+    bot_id = context.bot.id
     for g in groups:
         for m in list(g['members']):
+            # Always exclude the bot itself, regardless of any API check
+            if m['id'] == bot_id:
+                database.remove_added_member(m['id'])
+                g['members'].remove(m)
+                continue
             try:
                 cm = await context.bot.get_chat_member(P2P_ROOM_GROUP_ID, m['id'])
                 if cm.status in ("left", "kicked") or cm.user.is_bot:
