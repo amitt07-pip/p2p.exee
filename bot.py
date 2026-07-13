@@ -1873,12 +1873,32 @@ async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     logger.info(f"👑 Admin {user.id} added new admin {target_user_id} (@{target_username})")
 
 
-def build_list_text() -> str:
-    """Render the /list message from current added-member records."""
+async def _prune_departed_members(context: ContextTypes.DEFAULT_TYPE, groups: list) -> None:
+    """Drop members who are no longer in the P2P ROOM group (verified live via getChatMember)."""
+    for g in groups:
+        for m in list(g['members']):
+            try:
+                cm = await context.bot.get_chat_member(P2P_ROOM_GROUP_ID, m['id'])
+                if cm.status in ("left", "kicked"):
+                    database.remove_added_member(m['id'])
+                    g['members'].remove(m)
+            except Exception as e:
+                # "user not found" / "member not found" => they were never/no longer in the group
+                if any(s in str(e).lower() for s in ("not found", "user_id_invalid", "participant")):
+                    database.remove_added_member(m['id'])
+                    g['members'].remove(m)
+                else:
+                    logger.info(f"/list membership check skipped for {m['id']}: {e}")
+
+
+async def build_list_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Render the /list message from current added-member records, pruning departed members."""
     star = premium_emoji(PREMIUM_EMOJI_STAR, "📋")
     user_e = premium_emoji(PREMIUM_EMOJI_USER, "👤")
 
     groups = database.get_added_members_grouped()
+    await _prune_departed_members(context, groups)
+    groups = [g for g in groups if g['members']]
     if not groups:
         return f"{star} <b><u>Added Members</u></b>\n\nℹ️ No added members recorded yet."
 
@@ -1918,7 +1938,7 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if user.id not in ADMIN_USER_IDS:
         return
 
-    text = build_list_text()
+    text = await build_list_text(context)
     try:
         await update.message.reply_text(text, parse_mode='HTML', reply_markup=build_list_keyboard())
     except Exception as e:
@@ -1935,7 +1955,7 @@ async def handle_list_callback(query, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("Admins only.", show_alert=True)
         return
 
-    text = build_list_text()
+    text = await build_list_text(context)
     kb = build_list_keyboard()
     try:
         await query.edit_message_text(text, parse_mode='HTML', reply_markup=kb)
