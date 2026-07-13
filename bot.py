@@ -1877,6 +1877,12 @@ async def _prune_departed_members(context: ContextTypes.DEFAULT_TYPE, groups: li
     """Drop members who are no longer in the P2P ROOM group (verified live via getChatMember)."""
     bot_id = context.bot.id
     for g in groups:
+        # If the bot itself is the adder, drop the whole group (auto-adds aren't tracked)
+        if g['added_by'] == bot_id:
+            for m in list(g['members']):
+                database.remove_added_member(m['id'])
+            g['members'].clear()
+            continue
         for m in list(g['members']):
             # Always exclude the bot itself, regardless of any API check
             if m['id'] == bot_id:
