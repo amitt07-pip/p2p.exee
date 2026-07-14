@@ -685,9 +685,12 @@ def get_active_deal_by_address_for_user(address: str, user_id: int = None, usern
 
 def get_active_deal_by_address(address: str) -> Optional[Dict[str, Any]]:
     """
-    Find the most recent active deal whose escrow address matches, without
-    narrowing to a participant. Used by /verify as a fallback so the room is
-    still shown when the requester isn't a buyer/seller (e.g. an admin).
+    Return the single active deal whose escrow address matches — but only when
+    it's unambiguous. Escrow addresses rotate between just the owner/CEO
+    wallets, so the same address is shared across many rooms; if more than one
+    active deal uses it we return None rather than guess the wrong room.
+    Used by /verify only as a safe fallback when the requester isn't a
+    buyer/seller of any matching deal.
     """
     try:
         conn = get_db_connection()
@@ -700,15 +703,17 @@ def get_active_deal_by_address(address: str) -> Optional[Dict[str, Any]]:
             WHERE LOWER(escrow_address) = LOWER(%s)
               AND deal_status NOT IN (%s, %s, %s)
             ORDER BY created_at DESC
-            LIMIT 1
+            LIMIT 2
         """, (
             address,
             DEAL_STATUS_COMPLETED, DEAL_STATUS_CANCELLED, DEAL_STATUS_EXPIRED,
         ))
-        row = cur.fetchone()
+        rows = cur.fetchall()
         cur.close()
         conn.close()
-        return dict(row) if row else None
+        if len(rows) == 1:
+            return dict(rows[0])
+        return None
     except Exception as e:
         logger.warning(f"Could not find active deal by address: {e}")
         return None
