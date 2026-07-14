@@ -3292,6 +3292,10 @@ Once you've sent the amount, tap the button below."""
             
             # Store the role
             user_roles[original_chat_id][username_lower] = role_type
+            # Cache this user's real Telegram id so set_roles can persist
+            # buyer_user_id / seller_user_id (used by /verify and /stats).
+            if query.from_user.username:
+                save_user_id(query.from_user.username, query.from_user.id)
             logger.info(f"👤 {username} selected role: {role_type} in room {original_chat_id}")
             
             # Get updated roles
