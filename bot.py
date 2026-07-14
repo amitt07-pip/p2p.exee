@@ -789,7 +789,7 @@ Only the seller needs to approve to release payment."""
 
 
 async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /deal @username or /deal [user_id] command"""
+    """Handle /room @username or /room [user_id] command"""
     # Check if command is from a group
     if update.effective_chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("❌ This command can only be used inside a group.")
@@ -804,12 +804,12 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     is_bot = False
     
     # First try: check if mentioned with @username
-    username_match = re.search(r'/deal\s+@(\w+)', message_text)
+    username_match = re.search(r'/room\s+@(\w+)', message_text)
     if username_match:
         counterparty_username = username_match.group(1)
     else:
         # Second try: check if user ID is provided (numeric)
-        userid_match = re.search(r'/deal\s+(\d+)', message_text)
+        userid_match = re.search(r'/room\s+(\d+)', message_text)
         if userid_match:
             counterparty_user_id = int(userid_match.group(1))
         # Third try: check if replying to someone's message
@@ -839,10 +839,10 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # If no counterparty found, show error
     if not counterparty_username and not counterparty_user_id:
         await update.message.reply_text(
-            "❌ Please mention the counterparty (tap their name to tag), provide their user ID, or reply to their message when using /deal.\n\n"
+            "❌ Please mention the counterparty (tap their name to tag), provide their user ID, or reply to their message when using /room.\n\n"
             "Usage:\n"
-            "/deal @username\n"
-            "/deal 123456789"
+            "/room @username\n"
+            "/room 123456789"
         )
         return
     
@@ -857,9 +857,9 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Queue the deal request for userbot to process
     if write_deal_request(user.id, user.username or user.first_name, counterparty_username, initiator_chat_id, counterparty_user_id):
         if counterparty_username:
-            logger.info(f"📋 /deal command: {user.username or user.first_name} -> @{counterparty_username}")
+            logger.info(f"📋 /room command: {user.username or user.first_name} -> @{counterparty_username}")
         else:
-            logger.info(f"📋 /deal command: {user.username or user.first_name} -> User {counterparty_user_id}")
+            logger.info(f"📋 /room command: {user.username or user.first_name} -> User {counterparty_user_id}")
         
         # Start polling for results (silently, no initial message)
         for _ in range(60):  # Check for 30 seconds with faster polling
@@ -5950,7 +5950,7 @@ async def auto_close_expired_deals(application: Application) -> None:
 
 This deal has been automatically closed because it was running for more than 12 hours without completion.
 
-If you need to continue this transaction, please start a new deal using /deal command."""
+If you need to continue this transaction, please start a new deal using /room command."""
                     
                     try:
                         await application.bot.send_message(
@@ -6003,7 +6003,7 @@ def main() -> None:
     application = Application.builder().token(token).build()
     
     # Add handlers
-    application.add_handler(CommandHandler("deal", deal_command))
+    application.add_handler(CommandHandler("room", deal_command))
     application.add_handler(CommandHandler("release", release_command))
     application.add_handler(CommandHandler("kick", kick_command))
     application.add_handler(CommandHandler("link", link_command))
