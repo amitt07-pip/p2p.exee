@@ -2295,10 +2295,14 @@ Examples:
         info = escrow_addresses[address_to_verify]
         info = {"token": "/".join(sorted(info["tokens"])), "chain": info["chain"], "type": info["type"]}
 
-        # Find which active deal/room this address belongs to for the requesting user
+        # Find which active deal/room this address belongs to. Prefer the
+        # requester's own deal; fall back to the latest active deal with that
+        # address so the room still shows for non-participants (e.g. admins).
         deal = database.get_active_deal_by_address_for_user(
             address_to_verify, user_id=user.id, username=user.username
         )
+        if not deal:
+            deal = database.get_active_deal_by_address(address_to_verify)
         group_line = ""
         if deal and deal.get('room_number') is not None:
             room_name = deal.get('room_name') or 'MM ROOM'
