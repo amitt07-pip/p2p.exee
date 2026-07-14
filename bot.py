@@ -2304,18 +2304,23 @@ Examples:
         if not deal:
             deal = database.get_active_deal_by_address(address_to_verify)
         group_line = ""
-        if deal and deal.get('room_number') is not None:
-            room_name = deal.get('room_name') or 'MM ROOM'
-            room_number = deal['room_number']
-            group = room_name if str(room_number) in str(room_name) else f"{room_name} {room_number}"
-            group_line = f"\nGroup: {group}"
+        if deal:
+            room_name = deal.get('room_name')
+            room_number = deal.get('room_number')
+            group = None
+            if room_name:
+                group = room_name if (room_number is None or str(room_number) in str(room_name)) else f"{room_name} {room_number}"
+            elif room_number is not None:
+                group = f"MM ROOM {room_number}"
+            if group:
+                group_line = f"\nGroup: {group}"
 
         verified_text = f"""✅ Address verified
 
 Token: {info['token']}
 Chain: {info['chain']}{group_line}"""
         await update.effective_chat.send_message(verified_text, parse_mode='HTML')
-        logger.info(f"✅ Address verified for user {user.id}: {address_to_verify} ({info['token']} on {info['chain']}) room={deal.get('room_number') if deal else None}")
+        logger.info(f"✅ Address verified for user {user.id}: {address_to_verify} ({info['token']} on {info['chain']}) group={group_line.strip() or None}")
     else:
         warning_text = """⚠️ <b>WARNING:</b> Address Not Verified
 
@@ -5840,6 +5845,7 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
         counterparty_username = room_info.get('counterparty_username', '')
         counterparty_user_id = room_info.get('counterparty_user_id')
         room_name = room_info.get('room_name', '')
+        room_number = room_info.get('room_number')
         
         if counterparty_user_id:
             logger.info(f"Room info found: {room_name} - initiator: @{initiator_username}, counterparty: User {counterparty_user_id}")
@@ -5854,7 +5860,8 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
         # Create deal record in database
         database.create_deal(
             chat_id=chat_id,
-            room_name=room_name
+            room_name=room_name,
+            room_number=room_number
         )
         logger.info(f"📊 Deal record created in database for {room_name}")
         
