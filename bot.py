@@ -4893,18 +4893,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         
         # Check if room is waiting for payment method input (Step 6 in new flow)
         elif room_transaction_state.get(original_chat_id) == 'step6_payment':
-            # Payment method is case-insensitive - accept UPI, upi, Upi, etc.
-            payment_method_upper = text.upper()
-            if payment_method_upper not in valid_payment_methods:
-                await update.message.reply_text("❌ Invalid Payment Method")
+            # Accept any free-text payment method
+            payment_method = text.strip()
+            if not payment_method:
+                await update.message.reply_text("❌ Please enter a payment method")
                 return
             
-            # Store as uppercase for consistency
-            user_payment_methods[user_id] = payment_method_upper
-            logger.info(f"✅ User {user.username} selected payment method: {payment_method_upper} in room {original_chat_id}")
+            user_payment_methods[user_id] = payment_method
+            logger.info(f"✅ User {user.username} entered payment method: {payment_method} in room {original_chat_id}")
             
             # Save payment method to database
-            database.set_payment_method(original_chat_id, payment_method_upper)
+            database.set_payment_method(original_chat_id, payment_method)
             
             # Send Step 7 message (Buyer Wallet Address)
             send_chat_id = -1000000000000 - original_chat_id
