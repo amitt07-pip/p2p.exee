@@ -2976,10 +2976,9 @@ Release has been declined by the seller."""
             # Update the button to show selection (no selection indicator)
             try:
                 await query.edit_message_caption(
-                    caption="<b>Step 2 - Choose Blockchain</b>",
+                    caption="<b>STEP 2 - CHOOSE BLOCKCHAIN</b>",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}_done"),
-                        InlineKeyboardButton("TRON", callback_data=f"blockchain_tron_{chat_id}")
+                        InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}_done")
                     ]]),
                     parse_mode='HTML'
                 )
@@ -3000,55 +2999,6 @@ Release has been declined by the seller."""
             
         except Exception as e:
             logger.error(f"❌ Error handling blockchain selection: {e}", exc_info=True)
-            await query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
-            return CHOOSING
-    
-    # Handle TRON blockchain selection
-    elif query.data.startswith('blockchain_tron_'):
-        try:
-            parts = query.data.split('_')
-            chat_id = int(parts[2])
-            send_chat_id = get_send_chat_id(chat_id)
-            
-            # Check if blockchain is already set (idempotency guard)
-            if chat_id in user_blockchain and user_blockchain[chat_id] == 'TRON':
-                # Already selected, just acknowledge
-                await query.answer("TRON already selected")
-                return CHOOSING
-            
-            logger.info(f"✅ User selected blockchain: TRON in room {chat_id}")
-            user_blockchain[chat_id] = 'TRON'
-            
-            # Save blockchain to database
-            database.set_network(chat_id, 'TRON')
-            
-            # Update the button to show selection (no selection indicator)
-            try:
-                await query.edit_message_caption(
-                    caption="<b>Step 2 - Choose Blockchain</b>",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}"),
-                        InlineKeyboardButton("TRON", callback_data=f"blockchain_tron_{chat_id}_done")
-                    ]]),
-                    parse_mode='HTML'
-                )
-                logger.info(f"✅ Updated blockchain button for room {chat_id}")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not edit blockchain message for room {chat_id}: {e}")
-            
-            # Send Step 3 (coin selection) message only if not already sent
-            if chat_id not in step3_coin_messages:
-                logger.info(f"📨 Sending Step 3 (coin selection) message to room {chat_id}")
-                await send_step3_coin_message(context.bot, send_chat_id, chat_id)
-                logger.info(f"✅ Step 3 sent for room {chat_id}")
-            else:
-                logger.info(f"⏩ Step 3 already sent for room {chat_id}, skipping")
-            
-            await query.answer("Blockchain: TRON selected")
-            return CHOOSING
-            
-        except Exception as e:
-            logger.error(f"❌ Error handling TRON blockchain selection: {e}", exc_info=True)
             await query.answer(f"❌ Error: {str(e)[:50]}", show_alert=True)
             return CHOOSING
     
@@ -4472,11 +4422,10 @@ async def send_step6_payment_message(bot, send_chat_id: int, chat_id: int) -> No
 async def send_step2_blockchain_message(bot, send_chat_id: int, chat_id: int) -> None:
     """Send Step 2 - Blockchain selection message with BSC and TRON buttons"""
     try:
-        step2_text = "<b>Step 2 - Choose Blockchain</b>"
+        step2_text = "<b>STEP 2 - CHOOSE BLOCKCHAIN</b>"
         
         keyboard = [[
-            InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}"),
-            InlineKeyboardButton("TRON", callback_data=f"blockchain_tron_{chat_id}")
+            InlineKeyboardButton("BSC", callback_data=f"blockchain_bsc_{chat_id}")
         ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -4515,19 +4464,13 @@ async def send_step2_blockchain_message(bot, send_chat_id: int, chat_id: int) ->
 async def send_step3_coin_message(bot, send_chat_id: int, chat_id: int) -> None:
     """Send Step 3 - Select Coin message with USDT/USDC buttons (TRON only shows USDT)"""
     try:
-        step3_text = "<b>Step 3 - Select Coin</b>"
+        step3_text = "<b>STEP 3 - SELECT COIN</b>"
         
-        # Check if TRON is selected - only show USDT for TRON
-        selected_blockchain = user_blockchain.get(chat_id, 'BSC')
-        if selected_blockchain == 'TRON':
-            # TRON only supports USDT
-            keyboard = [[InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}")]]
-        else:
-            # BSC supports both USDT and USDC
-            keyboard = [[
-                InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}"),
-                InlineKeyboardButton("USDC", callback_data=f"coin_usdc_{chat_id}")
-            ]]
+        # BSC supports both USDT and USDC
+        keyboard = [[
+            InlineKeyboardButton("USDT", callback_data=f"coin_usdt_{chat_id}"),
+            InlineKeyboardButton("USDC", callback_data=f"coin_usdc_{chat_id}")
+        ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         image_path = "step5_coin_image.jpg"
@@ -5797,7 +5740,7 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
                             counterparty_trade_display = f"<a href=\"tg://user?id={counterparty_user_id}\">User {counterparty_user_id}</a>"
                         else:
                             counterparty_trade_display = f"@{counterparty_username}"
-                        trade_started_text = f"✅ <b>Trade started between @{initiator_username} and {counterparty_trade_display}.</b>"
+                        trade_started_text = f"✅ Trade started between @{initiator_username} and {counterparty_trade_display}."
                         
                         new_msg = await bot.send_message(
                             chat_id=deal_chat_id,
@@ -5823,7 +5766,7 @@ async def send_disclaimer_message(bot, send_chat_id: int, room_name: str, origin
     try:
         disclaimer_text = (
             "⚠️ P2P Deal Disclaimer ⚠️\n\n"
-            "• Always verify the admin wallet before sending any funds.\n"
+            "• Always verify the <b>admin wallet</b> before sending any funds.\n"
             "• Confirm <code>@pool</code> is present in both the deal room & the main group.\n"
             "• ❌ Never engage in direct or outside-room deals.\n"
             "• 💬 Share all details only within this deal room."
