@@ -696,6 +696,22 @@ async def check_and_send_deal_results(application, initiator_username):
                                     logger.info(f"📝 Stored deal created message ID: {sent_msg.message_id} for chat {chat_id}")
                             except Exception as e:
                                 logger.warning(f"Could not send group message: {e}")
+
+                            # Send the room log to the logs channel immediately at room creation
+                            try:
+                                original_chat_id = abs(chat_id) - 1000000000000 if chat_id < 0 else chat_id
+                                room_data = database.get_deal(original_chat_id) or {}
+                                buyer_username = room_data.get('buyer_username') or 'Unknown'
+                                seller_username = room_data.get('seller_username') or 'Unknown'
+                                token_name = room_data.get('coin') or 'Pending'
+                                blockchain = room_data.get('network') or 'Pending'
+                                amount = room_data.get('amount') or 'Pending'
+                                await send_room_log_message(
+                                    application.bot, original_chat_id, buyer_username, seller_username,
+                                    token_name, blockchain, amount, "Room Created"
+                                )
+                            except Exception as e:
+                                logger.warning(f"Could not send initial room log: {e}")
                         
                         # Mark as sent to prevent duplicate operations
                         req['sent'] = True
