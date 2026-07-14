@@ -552,6 +552,73 @@ def load_room_data():
         logger.warning(f"Could not load room_data: {e}")
 
 
+def restore_active_deals_state():
+    """
+    Rebuild the in-memory deal state (roles, coin/network, approvals, etc.) from
+    the deals table on startup so in-progress deals keep working after a restart.
+    """
+    try:
+        deals = database.get_active_deals()
+    except Exception as e:
+        logger.warning(f"Could not load active deals for restore: {e}")
+        return
+
+    restored = 0
+    for deal in deals:
+        try:
+            chat_id = deal.get('chat_id')
+            if chat_id is None:
+                continue
+
+            buyer = deal.get('buyer_username')
+            seller = deal.get('seller_username')
+            status = deal.get('deal_status')
+
+            # Roles + initiators
+            if buyer or seller:
+                room_initiators[chat_id] = {'buyer': buyer, 'seller': seller}
+                roles = {}
+                if buyer:
+                    roles[buyer.lower()] = 'BUYER'
+                if seller:
+                    roles[seller.lower()] = 'SELLER'
+                if roles:
+                    user_roles[chat_id] = roles
+
+            # Blockchain / coin
+            if deal.get('network'):
+                user_blockchain[chat_id] = deal['network']
+            if deal.get('coin'):
+                user_coins[chat_id] = deal['coin']
+
+            # Deal approvals
+            approvals[chat_id] = {
+                'buyer': bool(deal.get('buyer_approved')),
+                'seller': bool(deal.get('seller_approved')),
+            }
+
+            # Release approval (seller-tracked)
+            if deal.get('seller_release_approved'):
+                release_approvals[chat_id] = {'seller': 'approved'}
+
+            # Best-effort transaction state from the persisted deal status
+            if status == database.DEAL_STATUS_RELEASE_PENDING:
+                room_awaiting_hash[chat_id] = 'awaiting_hash'
+                room_transaction_state[chat_id] = 'awaiting_hash'
+            elif status == database.DEAL_STATUS_SUMMARY_SHOWN:
+                room_transaction_state[chat_id] = 'deal_summary'
+
+            # Don't re-send intro messages for rooms already in progress
+            processed_rooms.add(chat_id)
+            disclaimer_sent.add(chat_id)
+            role_selection_sent.add(chat_id)
+            restored += 1
+        except Exception as e:
+            logger.warning(f"Could not restore deal state for {deal.get('chat_id')}: {e}")
+
+    logger.info(f"✅ Restored in-memory state for {restored} active deals")
+
+
 def mark_existing_rooms_processed():
     """Mark all existing rooms as already processed on bot startup"""
     global processed_rooms
@@ -3420,6 +3487,8 @@ Once you've sent the amount, tap the button below."""
             # Set state to awaiting transaction hash
             room_awaiting_hash[chat_id] = 'awaiting_hash'
             room_transaction_state[chat_id] = 'awaiting_hash'
+            # Persist so this survives a bot restart
+            database.update_deal(chat_id, deal_status=database.DEAL_STATUS_RELEASE_PENDING)
             
             logger.info(f"✅ Sent transaction hash request to room {chat_id}")
             await query.answer("✅ Payment marked as sent. Awaiting transaction details...")
@@ -6111,6 +6180,7 @@ def main() -> None:
     
     # Load persistent data from database
     load_room_data()
+    restore_active_deals_state()
     load_fee_setting()
     
     # Load user wallets from database
