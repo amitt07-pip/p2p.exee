@@ -198,29 +198,34 @@ DEFAULT_OWNER_WALLET_TRON = "T0000000000000000000000000000000000"  # Placeholder
 DEFAULT_CEO_WALLET_BSC = "0xa3D0e7da537057cbeC62A48235FbEc8BB38B4E08"
 DEFAULT_CEO_WALLET_TRON = "TDAyZ8PB1MnFXPywHDgrHwa3zkwwXB3WDR"
 
-# In-memory cache for owner wallet (loaded from DB on startup)
+# In-memory cache for owner wallet (loaded from DB on startup), keyed by (network, token)
 owner_wallet_cache = {
-    'BSC': DEFAULT_OWNER_WALLET_BSC,
-    'TRON': DEFAULT_OWNER_WALLET_TRON
+    ('BSC', 'USDT'): DEFAULT_OWNER_WALLET_BSC,
+    ('BSC', 'USDC'): DEFAULT_OWNER_WALLET_BSC,
+    ('TRON', 'USDT'): DEFAULT_OWNER_WALLET_TRON,
 }
 
-# In-memory cache for CEO wallet (loaded from DB on startup)
+# In-memory cache for CEO wallet (loaded from DB on startup), keyed by (network, token)
 ceo_wallet_cache = {
-    'BSC': DEFAULT_CEO_WALLET_BSC,
-    'TRON': DEFAULT_CEO_WALLET_TRON
+    ('BSC', 'USDT'): DEFAULT_CEO_WALLET_BSC,
+    ('BSC', 'USDC'): DEFAULT_CEO_WALLET_BSC,
+    ('TRON', 'USDT'): DEFAULT_CEO_WALLET_TRON,
 }
+
+# Pending wallet-set requests awaiting a token choice: {user_id: {'role','network','address'}}
+pending_wallet_set = {}
 
 # Wallet rotation index (alternates between owner and CEO wallet)
 wallet_rotation_index = 0
 
-def get_rotating_deposit_wallet(network: str) -> str:
+def get_rotating_deposit_wallet(network: str, token: str = 'USDT') -> str:
     """Get deposit wallet address with rotation between owner and CEO wallets"""
     global wallet_rotation_index
     wallet_rotation_index = (wallet_rotation_index + 1) % 2
     if wallet_rotation_index == 0:
-        return get_owner_wallet(network)
+        return get_owner_wallet(network, token)
     else:
-        return get_ceo_wallet(network)
+        return get_ceo_wallet(network, token)
 
 # BEP20/TRC20 Token contract addresses for verification
 TOKEN_CONTRACTS = {
@@ -286,6 +291,23 @@ def get_user_id(username: str) -> int:
     """Get user_id from username"""
     return user_id_map.get(username.lower())
 
+def _migrate_wallet_table(cur, table: str):
+    """Add per-token support to a wallet settings table (network, token) unique."""
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS {table} (
+            network VARCHAR(10),
+            wallet_address TEXT NOT NULL,
+            token VARCHAR(10) DEFAULT 'USDT',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_by BIGINT
+        )
+    """)
+    cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS token VARCHAR(10) DEFAULT 'USDT'")
+    cur.execute(f"UPDATE {table} SET token = 'USDT' WHERE token IS NULL")
+    # Drop any old single-column primary key so (network, token) rows can coexist
+    cur.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_pkey")
+    cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_net_token ON {table} (network, token)")
+
 def init_owner_wallet_table():
     """Initialize the owner_wallet_settings table"""
     try:
@@ -293,14 +315,7 @@ def init_owner_wallet_table():
         if not conn:
             return
         cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS owner_wallet_settings (
-                network VARCHAR(10) PRIMARY KEY,
-                wallet_address TEXT NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_by BIGINT
-            )
-        """)
+        _migrate_wallet_table(cur, "owner_wallet_settings")
         conn.commit()
         cur.close()
         conn.close()
@@ -308,32 +323,32 @@ def init_owner_wallet_table():
     except Exception as e:
         logger.warning(f"Could not initialize owner wallet table: {e}")
 
-def save_owner_wallet(network: str, wallet_address: str, updated_by: int = None):
-    """Save owner wallet address to database"""
+def save_owner_wallet(network: str, wallet_address: str, token: str = 'USDT', updated_by: int = None):
+    """Save owner wallet address (per network+token) to database"""
     global owner_wallet_cache
     try:
         conn = get_db_connection()
         if not conn:
-            owner_wallet_cache[network] = wallet_address
+            owner_wallet_cache[(network, token)] = wallet_address
             return True
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO owner_wallet_settings (network, wallet_address, updated_at, updated_by)
-            VALUES (%s, %s, CURRENT_TIMESTAMP, %s)
-            ON CONFLICT (network) DO UPDATE SET 
+            INSERT INTO owner_wallet_settings (network, token, wallet_address, updated_at, updated_by)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s)
+            ON CONFLICT (network, token) DO UPDATE SET 
                 wallet_address = %s,
                 updated_at = CURRENT_TIMESTAMP,
                 updated_by = %s
-        """, (network, wallet_address, updated_by, wallet_address, updated_by))
+        """, (network, token, wallet_address, updated_by, wallet_address, updated_by))
         conn.commit()
         cur.close()
         conn.close()
-        owner_wallet_cache[network] = wallet_address
-        logger.info(f"✅ Saved owner wallet for {network}: {wallet_address}")
+        owner_wallet_cache[(network, token)] = wallet_address
+        logger.info(f"✅ Saved owner wallet for {network}/{token}: {wallet_address}")
         return True
     except Exception as e:
         logger.warning(f"Could not save owner wallet: {e}")
-        owner_wallet_cache[network] = wallet_address
+        owner_wallet_cache[(network, token)] = wallet_address
         return False
 
 def load_owner_wallets():
@@ -344,23 +359,25 @@ def load_owner_wallets():
         if not conn:
             return
         cur = conn.cursor()
-        cur.execute("SELECT network, wallet_address FROM owner_wallet_settings")
+        cur.execute("SELECT network, token, wallet_address FROM owner_wallet_settings")
         rows = cur.fetchall()
         for row in rows:
-            owner_wallet_cache[row[0]] = row[1]
-            logger.info(f"📋 Loaded owner wallet for {row[0]}: {row[1]}")
+            token = row[1] or 'USDT'
+            owner_wallet_cache[(row[0], token)] = row[2]
+            logger.info(f"📋 Loaded owner wallet for {row[0]}/{token}: {row[2]}")
         cur.close()
         conn.close()
     except Exception as e:
         logger.warning(f"Could not load owner wallets: {e}")
 
-def get_owner_wallet(network: str) -> str:
-    """Get owner wallet address for a network"""
-    if network == 'BSC':
-        return owner_wallet_cache.get('BSC', DEFAULT_OWNER_WALLET_BSC)
-    elif network == 'TRON':
-        return owner_wallet_cache.get('TRON', DEFAULT_OWNER_WALLET_TRON)
-    return owner_wallet_cache.get('BSC', DEFAULT_OWNER_WALLET_BSC)
+def get_owner_wallet(network: str, token: str = 'USDT') -> str:
+    """Get owner wallet address for a network + token (falls back to USDT / defaults)"""
+    addr = owner_wallet_cache.get((network, token)) or owner_wallet_cache.get((network, 'USDT'))
+    if addr:
+        return addr
+    if network == 'TRON':
+        return DEFAULT_OWNER_WALLET_TRON
+    return DEFAULT_OWNER_WALLET_BSC
 
 def init_ceo_wallet_table():
     """Initialize the ceo_wallet_settings table"""
@@ -369,14 +386,7 @@ def init_ceo_wallet_table():
         if not conn:
             return
         cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS ceo_wallet_settings (
-                network VARCHAR(10) PRIMARY KEY,
-                wallet_address TEXT NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_by BIGINT
-            )
-        """)
+        _migrate_wallet_table(cur, "ceo_wallet_settings")
         conn.commit()
         cur.close()
         conn.close()
@@ -384,32 +394,32 @@ def init_ceo_wallet_table():
     except Exception as e:
         logger.warning(f"Could not initialize CEO wallet table: {e}")
 
-def save_ceo_wallet(network: str, wallet_address: str, updated_by: int = None):
-    """Save CEO wallet address to database"""
+def save_ceo_wallet(network: str, wallet_address: str, token: str = 'USDT', updated_by: int = None):
+    """Save CEO wallet address (per network+token) to database"""
     global ceo_wallet_cache
     try:
         conn = get_db_connection()
         if not conn:
-            ceo_wallet_cache[network] = wallet_address
+            ceo_wallet_cache[(network, token)] = wallet_address
             return True
         cur = conn.cursor()
         cur.execute("""
-            INSERT INTO ceo_wallet_settings (network, wallet_address, updated_at, updated_by)
-            VALUES (%s, %s, CURRENT_TIMESTAMP, %s)
-            ON CONFLICT (network) DO UPDATE SET 
+            INSERT INTO ceo_wallet_settings (network, token, wallet_address, updated_at, updated_by)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s)
+            ON CONFLICT (network, token) DO UPDATE SET 
                 wallet_address = %s,
                 updated_at = CURRENT_TIMESTAMP,
                 updated_by = %s
-        """, (network, wallet_address, updated_by, wallet_address, updated_by))
+        """, (network, token, wallet_address, updated_by, wallet_address, updated_by))
         conn.commit()
         cur.close()
         conn.close()
-        ceo_wallet_cache[network] = wallet_address
-        logger.info(f"✅ Saved CEO wallet for {network}: {wallet_address}")
+        ceo_wallet_cache[(network, token)] = wallet_address
+        logger.info(f"✅ Saved CEO wallet for {network}/{token}: {wallet_address}")
         return True
     except Exception as e:
         logger.warning(f"Could not save CEO wallet: {e}")
-        ceo_wallet_cache[network] = wallet_address
+        ceo_wallet_cache[(network, token)] = wallet_address
         return False
 
 def load_ceo_wallets():
@@ -420,23 +430,25 @@ def load_ceo_wallets():
         if not conn:
             return
         cur = conn.cursor()
-        cur.execute("SELECT network, wallet_address FROM ceo_wallet_settings")
+        cur.execute("SELECT network, token, wallet_address FROM ceo_wallet_settings")
         rows = cur.fetchall()
         for row in rows:
-            ceo_wallet_cache[row[0]] = row[1]
-            logger.info(f"📋 Loaded CEO wallet for {row[0]}: {row[1]}")
+            token = row[1] or 'USDT'
+            ceo_wallet_cache[(row[0], token)] = row[2]
+            logger.info(f"📋 Loaded CEO wallet for {row[0]}/{token}: {row[2]}")
         cur.close()
         conn.close()
     except Exception as e:
         logger.warning(f"Could not load CEO wallets: {e}")
 
-def get_ceo_wallet(network: str) -> str:
-    """Get CEO wallet address for a network"""
-    if network == 'BSC':
-        return ceo_wallet_cache.get('BSC', DEFAULT_CEO_WALLET_BSC)
-    elif network == 'TRON':
-        return ceo_wallet_cache.get('TRON', DEFAULT_CEO_WALLET_TRON)
-    return ceo_wallet_cache.get('BSC', DEFAULT_CEO_WALLET_BSC)
+def get_ceo_wallet(network: str, token: str = 'USDT') -> str:
+    """Get CEO wallet address for a network + token (falls back to USDT / defaults)"""
+    addr = ceo_wallet_cache.get((network, token)) or ceo_wallet_cache.get((network, 'USDT'))
+    if addr:
+        return addr
+    if network == 'TRON':
+        return DEFAULT_CEO_WALLET_TRON
+    return DEFAULT_CEO_WALLET_BSC
 
 def save_fee_setting(fee_percent: float):
     """Save fee percentage to database"""
@@ -900,25 +912,29 @@ async def setownerwallet_command(update: Update, context: ContextTypes.DEFAULT_T
     parts = message_text.split(maxsplit=1)
     
     if len(parts) < 2:
-        # Show current owner wallet
-        current_bsc = get_owner_wallet('BSC')
-        current_tron = get_owner_wallet('TRON')
+        # Show current owner wallets (per token)
         await update.message.reply_text(
             f"<b>Current Owner Wallets:</b>\n\n"
-            f"<b>BSC:</b> <code>{current_bsc}</code>\n"
-            f"<b>TRON:</b> <code>{current_tron}</code>\n\n"
+            f"<b>BSC USDT:</b> <code>{get_owner_wallet('BSC', 'USDT')}</code>\n"
+            f"<b>BSC USDC:</b> <code>{get_owner_wallet('BSC', 'USDC')}</code>\n"
+            f"<b>TRON USDT:</b> <code>{get_owner_wallet('TRON', 'USDT')}</code>\n\n"
             f"<b>Usage:</b>\n"
-            f"<code>/setownerwallet 0x...</code> (for BSC)\n"
-            f"<code>/setownerwallet T...</code> (for TRON)",
+            f"<code>/setownerwallet 0x...</code> (BSC — pick USDT/USDC)\n"
+            f"<code>/setownerwallet T...</code> (TRON USDT)",
             parse_mode='HTML'
         )
         return
-    
-    new_address = parts[1].strip()
-    
+
+    await _handle_set_wallet(update, context, 'owner', parts[1].strip())
+
+
+async def _handle_set_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                             role: str, new_address: str) -> None:
+    """Validate a wallet address and either save it (TRON) or ask which token it's for (BSC)."""
+    user = update.effective_user
+
     # Validate and determine network based on address format
     if new_address.startswith('0x') and len(new_address) == 42:
-        # BSC address (0x + 40 hex chars)
         try:
             int(new_address[2:], 16)  # Validate hex
             network = 'BSC'
@@ -926,7 +942,6 @@ async def setownerwallet_command(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("❌ Invalid BSC address. Must be 0x followed by 40 hex characters.")
             return
     elif new_address.startswith('T') and len(new_address) == 34:
-        # TRON address (T + 33 chars)
         network = 'TRON'
     else:
         await update.message.reply_text(
@@ -935,23 +950,71 @@ async def setownerwallet_command(update: Update, context: ContextTypes.DEFAULT_T
             "TRON: Must start with T and be 34 characters"
         )
         return
-    
-    # Save the new owner wallet
-    if save_owner_wallet(network, new_address, user.id):
-        await update.message.reply_text(
-            f"✅ <b>Owner Wallet Updated!</b>\n\n"
-            f"<b>Network:</b> {network}\n"
-            f"<b>New Address:</b> <code>{new_address}</code>\n\n"
-            f"All future deal rooms will use this address for deposits.",
-            parse_mode='HTML'
-        )
-        logger.info(f"✅ Admin {user.id} updated {network} owner wallet to: {new_address}")
+
+    # TRON only has USDT — save directly
+    if network == 'TRON':
+        _save_wallet_for_token(role, network, 'USDT', new_address, user.id)
+        await _report_wallet_saved(update, role, network, 'USDT', new_address)
+        return
+
+    # BSC: ask which token this address is for
+    pending_wallet_set[user.id] = {'role': role, 'network': network, 'address': new_address}
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("USDT", callback_data=f"setwallet:{role}:USDT"),
+        InlineKeyboardButton("USDC", callback_data=f"setwallet:{role}:USDC"),
+    ]])
+    await update.message.reply_text(
+        f"<b>Set {role.upper()} {network} wallet</b>\n\n"
+        f"<code>{new_address}</code>\n\n"
+        f"Which token is this address for?",
+        parse_mode='HTML',
+        reply_markup=keyboard
+    )
+
+
+def _save_wallet_for_token(role: str, network: str, token: str, address: str, updated_by: int) -> bool:
+    """Persist a wallet address for the given role/network/token."""
+    if role == 'owner':
+        return save_owner_wallet(network, address, token, updated_by)
+    return save_ceo_wallet(network, address, token, updated_by)
+
+
+async def _report_wallet_saved(update_or_query, role: str, network: str, token: str, address: str) -> None:
+    """Send a confirmation that a wallet was saved (works for message or callback query)."""
+    text = (
+        f"✅ <b>{role.upper()} Wallet Updated!</b>\n\n"
+        f"<b>Network:</b> {network}\n"
+        f"<b>Token:</b> {token}\n"
+        f"<b>New Address:</b> <code>{address}</code>\n\n"
+        f"All future deal rooms will use this address for {token} deposits."
+    )
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(text, parse_mode='HTML')
     else:
-        await update.message.reply_text(
-            f"⚠️ Owner wallet updated in memory but could not save to database.\n"
-            f"The change will be lost on restart.",
-            parse_mode='HTML'
-        )
+        await update_or_query.message.reply_text(text, parse_mode='HTML')
+
+
+async def handle_setwallet_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle USDT/USDC token choice for /setownerwallet and /setceowallet."""
+    user_id = query.from_user.id
+    if user_id not in ADMIN_USER_IDS:
+        await query.answer("Admins only.", show_alert=True)
+        return
+
+    parts = query.data.split(':')  # setwallet:<role>:<token>
+    token = parts[2] if len(parts) > 2 else 'USDT'
+    pending = pending_wallet_set.pop(user_id, None)
+    if not pending:
+        await query.answer("This request expired, run the command again.", show_alert=True)
+        return
+
+    role = pending['role']
+    network = pending['network']
+    address = pending['address']
+    _save_wallet_for_token(role, network, token, address, user_id)
+    await query.answer(f"Saved as {token} ✅")
+    await _report_wallet_saved(query, role, network, token, address)
+    logger.info(f"✅ Admin {user_id} updated {network}/{token} {role} wallet to: {address}")
 
 
 async def setceowallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -967,58 +1030,20 @@ async def setceowallet_command(update: Update, context: ContextTypes.DEFAULT_TYP
     parts = message_text.split(maxsplit=1)
     
     if len(parts) < 2:
-        # Show current CEO wallet
-        current_bsc = get_ceo_wallet('BSC')
-        current_tron = get_ceo_wallet('TRON')
+        # Show current CEO wallets (per token)
         await update.message.reply_text(
             f"<b>Current CEO Wallets:</b>\n\n"
-            f"<b>BSC:</b> <code>{current_bsc}</code>\n"
-            f"<b>TRON:</b> <code>{current_tron}</code>\n\n"
+            f"<b>BSC USDT:</b> <code>{get_ceo_wallet('BSC', 'USDT')}</code>\n"
+            f"<b>BSC USDC:</b> <code>{get_ceo_wallet('BSC', 'USDC')}</code>\n"
+            f"<b>TRON USDT:</b> <code>{get_ceo_wallet('TRON', 'USDT')}</code>\n\n"
             f"<b>Usage:</b>\n"
-            f"<code>/setceowallet 0x...</code> (for BSC)\n"
-            f"<code>/setceowallet T...</code> (for TRON)",
+            f"<code>/setceowallet 0x...</code> (BSC — pick USDT/USDC)\n"
+            f"<code>/setceowallet T...</code> (TRON USDT)",
             parse_mode='HTML'
         )
         return
-    
-    new_address = parts[1].strip()
-    
-    # Validate and determine network based on address format
-    if new_address.startswith('0x') and len(new_address) == 42:
-        # BSC address (0x + 40 hex chars)
-        try:
-            int(new_address[2:], 16)  # Validate hex
-            network = 'BSC'
-        except ValueError:
-            await update.message.reply_text("❌ Invalid BSC address. Must be 0x followed by 40 hex characters.")
-            return
-    elif new_address.startswith('T') and len(new_address) == 34:
-        # TRON address (T + 33 chars)
-        network = 'TRON'
-    else:
-        await update.message.reply_text(
-            "❌ Invalid wallet address format.\n\n"
-            "BSC: Must start with 0x and be 42 characters\n"
-            "TRON: Must start with T and be 34 characters"
-        )
-        return
-    
-    # Save the new CEO wallet
-    if save_ceo_wallet(network, new_address, user.id):
-        await update.message.reply_text(
-            f"✅ <b>CEO Wallet Updated!</b>\n\n"
-            f"<b>Network:</b> {network}\n"
-            f"<b>New Address:</b> <code>{new_address}</code>\n\n"
-            f"All future deal rooms will use this address for deposits.",
-            parse_mode='HTML'
-        )
-        logger.info(f"✅ Admin {user.id} updated {network} CEO wallet to: {new_address}")
-    else:
-        await update.message.reply_text(
-            f"⚠️ CEO wallet updated in memory but could not save to database.\n"
-            f"The change will be lost on restart.",
-            parse_mode='HTML'
-        )
+
+    await _handle_set_wallet(update, context, 'ceo', parts[1].strip())
 
 
 async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1029,20 +1054,16 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if user.id not in ADMIN_USER_IDS:
         return
     
-    # Get all wallet addresses
-    owner_bsc = get_owner_wallet('BSC')
-    owner_tron = get_owner_wallet('TRON')
-    ceo_bsc = get_ceo_wallet('BSC')
-    ceo_tron = get_ceo_wallet('TRON')
-    
     await update.message.reply_text(
         f"<b>Active Deposit Wallets</b>\n\n"
         f"<b>Owner Wallet:</b>\n"
-        f"BSC: <code>{owner_bsc}</code>\n"
-        f"TRON: <code>{owner_tron}</code>\n\n"
+        f"BSC USDT: <code>{get_owner_wallet('BSC', 'USDT')}</code>\n"
+        f"BSC USDC: <code>{get_owner_wallet('BSC', 'USDC')}</code>\n"
+        f"TRON USDT: <code>{get_owner_wallet('TRON', 'USDT')}</code>\n\n"
         f"<b>CEO Wallet:</b>\n"
-        f"BSC: <code>{ceo_bsc}</code>\n"
-        f"TRON: <code>{ceo_tron}</code>",
+        f"BSC USDT: <code>{get_ceo_wallet('BSC', 'USDT')}</code>\n"
+        f"BSC USDC: <code>{get_ceo_wallet('BSC', 'USDC')}</code>\n"
+        f"TRON USDT: <code>{get_ceo_wallet('TRON', 'USDT')}</code>",
         parse_mode='HTML'
     )
 
@@ -2253,27 +2274,26 @@ Examples:
     
     address_to_verify = context.args[0].strip().lower()
     
-    # Build escrow addresses from owner and CEO wallets
+    # Build escrow addresses from owner and CEO wallets, per token.
+    # An address maps to the set of tokens it serves so /verify can say
+    # specifically USDT or USDC (or USDT/USDC if one address serves both).
     escrow_addresses = {}
-    
-    # Add owner wallets
-    owner_bsc = get_owner_wallet('BSC')
-    owner_tron = get_owner_wallet('TRON')
-    if owner_bsc:
-        escrow_addresses[owner_bsc.lower()] = {"token": "USDT/USDC", "chain": "BSC", "type": "Owner"}
-    if owner_tron and owner_tron != "T0000000000000000000000000000000000":
-        escrow_addresses[owner_tron.lower()] = {"token": "USDT", "chain": "TRON", "type": "Owner"}
-    
-    # Add CEO wallets
-    ceo_bsc = get_ceo_wallet('BSC')
-    ceo_tron = get_ceo_wallet('TRON')
-    if ceo_bsc:
-        escrow_addresses[ceo_bsc.lower()] = {"token": "USDT/USDC", "chain": "BSC", "type": "CEO"}
-    if ceo_tron and ceo_tron != "T0000000000000000000000000000000000":
-        escrow_addresses[ceo_tron.lower()] = {"token": "USDT", "chain": "TRON", "type": "CEO"}
-    
+
+    def _register(addr, token, chain, wtype):
+        if not addr or addr == "T0000000000000000000000000000000000":
+            return
+        key = addr.lower()
+        entry = escrow_addresses.setdefault(key, {"tokens": set(), "chain": chain, "type": wtype})
+        entry["tokens"].add(token)
+
+    for wtype, getter in (("Owner", get_owner_wallet), ("CEO", get_ceo_wallet)):
+        _register(getter('BSC', 'USDT'), "USDT", "BSC", wtype)
+        _register(getter('BSC', 'USDC'), "USDC", "BSC", wtype)
+        _register(getter('TRON', 'USDT'), "USDT", "TRON", wtype)
+
     if address_to_verify in escrow_addresses:
         info = escrow_addresses[address_to_verify]
+        info = {"token": "/".join(sorted(info["tokens"])), "chain": info["chain"], "type": info["type"]}
 
         # Find which active deal/room this address belongs to for the requesting user
         deal = database.get_active_deal_by_address_for_user(
@@ -2375,6 +2395,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Handle /list Update button
     if query.data == 'list:update':
         await handle_list_callback(query, context)
+        return
+
+    # Handle /setownerwallet & /setceowallet token choice (USDT/USDC)
+    if query.data.startswith('setwallet:'):
+        await handle_setwallet_callback(query, context)
         return
     
     # Handle release approval - seller only
@@ -3129,10 +3154,11 @@ Release has been declined by the seller."""
                     # Send deposit address message
                     blockchain = user_blockchain.get(chat_id, "BSC")
                     coin_type = coin if coin else "USDT"
+                    deposit_token = coin_type.upper() if coin_type.upper() in ('USDT', 'USDC') else 'USDT'
                     
-                    # Use rotating wallet (owner/CEO) for deposits
-                    deposit_address = get_rotating_deposit_wallet(blockchain)
-                    logger.info(f"🏦 Using rotating wallet for {blockchain}: {deposit_address}")
+                    # Use rotating wallet (owner/CEO) for deposits, per token
+                    deposit_address = get_rotating_deposit_wallet(blockchain, deposit_token)
+                    logger.info(f"🏦 Using rotating wallet for {blockchain}/{deposit_token}: {deposit_address}")
                     
                     # Confirm deal in database with escrow address
                     database.confirm_deal(chat_id, escrow_address=deposit_address)
@@ -4993,7 +5019,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 
                 if not escrow_address:
                     # Fallback to owner wallet if not in database
-                    escrow_address = get_owner_wallet(blockchain) if blockchain else None
+                    fb_token = coin.upper() if coin and coin.upper() in ('USDT', 'USDC') else 'USDT'
+                    escrow_address = get_owner_wallet(blockchain, fb_token) if blockchain else None
                     logger.warning(f"⚠️ Escrow not in database, using owner wallet: {escrow_address}")
                 
                 if not escrow_address:
