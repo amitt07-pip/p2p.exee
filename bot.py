@@ -2276,17 +2276,20 @@ Examples:
         info = escrow_addresses[address_to_verify]
 
         # Find which active deal/room this address belongs to for the requesting user
-        room_line = ""
         deal = database.get_active_deal_by_address_for_user(
             address_to_verify, user_id=user.id, username=user.username
         )
+        group_line = ""
         if deal and deal.get('room_number') is not None:
-            room_line = f"ROOM: {deal['room_number']}\n"
+            room_name = deal.get('room_name') or 'MM ROOM'
+            room_number = deal['room_number']
+            group = room_name if str(room_number) in str(room_name) else f"{room_name} {room_number}"
+            group_line = f"\nGroup: {group}"
 
         verified_text = f"""✅ Address verified
 
-{room_line}Token: {info['token']}
-Chain: {info['chain']}"""
+Token: {info['token']}
+Chain: {info['chain']}{group_line}"""
         await update.effective_chat.send_message(verified_text, parse_mode='HTML')
         logger.info(f"✅ Address verified for user {user.id}: {address_to_verify} ({info['token']} on {info['chain']}) room={deal.get('room_number') if deal else None}")
     else:
