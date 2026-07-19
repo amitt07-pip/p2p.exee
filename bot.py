@@ -2427,9 +2427,27 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     deal = database.get_deal(original_chat_id)
     room_name = (deal.get('room_name') if deal else None) or f"Room {original_chat_id}"
 
+    # Determine if the deposit was already confirmed (before we cancel the deal).
+    status = deal.get('deal_status') if deal else None
+    deposit_confirmed = (
+        original_chat_id in room_confirmed_deposits
+        or status in (
+            database.DEAL_STATUS_DEPOSIT_RECEIVED,
+            database.DEAL_STATUS_RELEASE_PENDING,
+            database.DEAL_STATUS_COMPLETED,
+        )
+    )
+
     # Step 1: mark the deal closed
     database.cancel_deal(original_chat_id)
     logger.info(f"🔒 Admin {user.id} closed deal {original_chat_id} ({room_name})")
+
+    # Update the room log message: completed if deposit was confirmed,
+    # otherwise replace the whole log with a bold "Deal Cancelled !".
+    if deposit_confirmed:
+        await update_room_log_status(context.bot, original_chat_id, "Deal Completed!")
+    else:
+        await overwrite_room_log(context.bot, original_chat_id, "<b>Deal Cancelled !</b>")
 
     # Notify the room that it's being closed
     try:
@@ -4715,6 +4733,24 @@ async def update_room_log_status(bot, chat_id: int, status: str) -> None:
     
     except Exception as e:
         logger.warning(f"❌ Failed to update room log status: {e}")
+
+
+async def overwrite_room_log(bot, chat_id: int, text: str) -> None:
+    """Replace the entire room log message with the given text."""
+    try:
+        if chat_id not in room_log_messages:
+            logger.warning(f"⚠️ No room log message found for room {chat_id}")
+            return
+        msg_info = room_log_messages[chat_id]
+        await bot.edit_message_text(
+            chat_id=msg_info['chat_id'],
+            message_id=msg_info['msg_id'],
+            text=text,
+            parse_mode='HTML'
+        )
+        logger.info(f"✅ Overwrote room log for room {chat_id}")
+    except Exception as e:
+        logger.warning(f"❌ Failed to overwrite room log: {e}")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
