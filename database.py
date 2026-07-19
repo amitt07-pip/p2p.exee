@@ -118,7 +118,10 @@ def init_database():
                 
                 -- Room metadata
                 room_name TEXT,
-                room_number INTEGER
+                room_number INTEGER,
+
+                -- Admin override: fix deposit to 'owner' or 'ceo' wallet
+                fixed_wallet_role TEXT
             )
         """)
         
@@ -150,6 +153,7 @@ def init_database():
             ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
             ("room_name", "TEXT"),
             ("room_number", "INTEGER"),
+            ("fixed_wallet_role", "TEXT"),
         ]
         
         for col_name, col_type in columns_to_add:
@@ -313,7 +317,7 @@ def update_deal(chat_id: int, **kwargs) -> bool:
             'deal_status', 'buyer_approved', 'seller_approved',
             'buyer_release_approved', 'seller_release_approved',
             'confirmed_at', 'deposit_at', 'completed_at',
-            'room_name', 'room_number'
+            'room_name', 'room_number', 'fixed_wallet_role'
         }
         
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_fields}

@@ -227,6 +227,22 @@ def get_rotating_deposit_wallet(network: str, token: str = 'USDT') -> str:
     else:
         return get_ceo_wallet(network, token)
 
+
+def get_deposit_wallet_for_room(chat_id: int, network: str, token: str = 'USDT') -> str:
+    """Resolve the deposit address for a room. If an admin fixed the room to the
+    owner or CEO wallet via /setaddy, use that role's address for the selected
+    network+token; otherwise fall back to the normal owner/CEO rotation."""
+    try:
+        deal = database.get_deal(chat_id)
+    except Exception:
+        deal = None
+    role = (deal.get('fixed_wallet_role') if deal else None)
+    if role == 'owner':
+        return get_owner_wallet(network, token)
+    if role == 'ceo':
+        return get_ceo_wallet(network, token)
+    return get_rotating_deposit_wallet(network, token)
+
 # BEP20/TRC20 Token contract addresses for verification
 TOKEN_CONTRACTS = {
     'BSC': {
@@ -1082,6 +1098,71 @@ async def handle_setwallet_callback(query, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer(f"Saved as {token} ✅")
     await _report_wallet_saved(query, role, network, token, address)
     logger.info(f"✅ Admin {user_id} updated {network}/{token} {role} wallet to: {address}")
+
+
+async def setaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /setaddy <room id> - admin only. Fix a room's deposit to the Owner or
+    CEO wallet. Works before network/token is chosen; the role is remembered and
+    resolved to the actual address when the deposit is generated."""
+    user = update.effective_user
+
+    # Silently ignore unauthorized users
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    if not context.args or not context.args[0].strip().lstrip('-').isdigit():
+        await update.message.reply_text(
+            "❌ Usage: <code>/setaddy &lt;room id&gt;</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    arg = int(context.args[0].strip())
+    original_chat_id = abs(arg) - 1000000000000 if arg < 0 else arg
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Owner", callback_data=f"setaddy:owner:{original_chat_id}"),
+        InlineKeyboardButton("CEO", callback_data=f"setaddy:ceo:{original_chat_id}"),
+    ]])
+    await update.message.reply_text(
+        f"<b>Set deposit wallet for room</b> <code>{original_chat_id}</code>\n\n"
+        f"Which marked address should this room use?",
+        parse_mode='HTML',
+        reply_markup=keyboard
+    )
+
+
+async def handle_setaddy_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle Owner/CEO choice for /setaddy and persist it on the room's deal."""
+    user_id = query.from_user.id
+    if user_id not in ADMIN_USER_IDS:
+        await query.answer("Admins only.", show_alert=True)
+        return
+
+    parts = query.data.split(':')  # setaddy:<role>:<chat_id>
+    role = parts[1] if len(parts) > 1 else ''
+    try:
+        original_chat_id = int(parts[2])
+    except (IndexError, ValueError):
+        await query.answer("Invalid request.", show_alert=True)
+        return
+
+    if role not in ('owner', 'ceo'):
+        await query.answer("Invalid choice.", show_alert=True)
+        return
+
+    # Ensure a deal record exists so the override persists (even before setup)
+    if not database.get_deal(original_chat_id):
+        database.create_deal(chat_id=original_chat_id)
+    database.update_deal(original_chat_id, fixed_wallet_role=role)
+
+    await query.answer(f"Fixed to {role.upper()} ✅")
+    await query.edit_message_text(
+        f"✅ Room <code>{original_chat_id}</code> deposit fixed to the <b>{role.upper()}</b> wallet.\n\n"
+        f"The deposit will use the {role.upper()} address for this room's selected network + token.",
+        parse_mode='HTML'
+    )
+    logger.info(f"🏦 Admin {user_id} fixed room {original_chat_id} deposit to {role} wallet")
 
 
 async def setceowallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2618,6 +2699,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data.startswith('setwallet:'):
         await handle_setwallet_callback(query, context)
         return
+
+    # Handle /setaddy Owner/CEO choice
+    if query.data.startswith('setaddy:'):
+        await handle_setaddy_callback(query, context)
+        return
     
     # Handle release approval - seller only
     if query.data.startswith('approve_release_'):
@@ -3323,9 +3409,10 @@ Release has been declined by the seller."""
                     coin_type = coin if coin else "USDT"
                     deposit_token = coin_type.upper() if coin_type.upper() in ('USDT', 'USDC') else 'USDT'
                     
-                    # Use rotating wallet (owner/CEO) for deposits, per token
-                    deposit_address = get_rotating_deposit_wallet(blockchain, deposit_token)
-                    logger.info(f"🏦 Using rotating wallet for {blockchain}/{deposit_token}: {deposit_address}")
+                    # Use the room's fixed wallet if an admin set one via /setaddy,
+                    # otherwise rotate between owner/CEO wallets, per token
+                    deposit_address = get_deposit_wallet_for_room(chat_id, blockchain, deposit_token)
+                    logger.info(f"🏦 Using deposit wallet for {blockchain}/{deposit_token}: {deposit_address}")
                     
                     # Confirm deal in database with escrow address
                     database.confirm_deal(chat_id, escrow_address=deposit_address)
@@ -6248,6 +6335,7 @@ def main() -> None:
     application.add_handler(CommandHandler("wallet", wallet_command))
     application.add_handler(CommandHandler("setownerwallet", setownerwallet_command))
     application.add_handler(CommandHandler("setceowallet", setceowallet_command))
+    application.add_handler(CommandHandler("setaddy", setaddy_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("verify", verify_command))
