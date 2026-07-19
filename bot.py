@@ -1776,6 +1776,28 @@ def _format_addstats_value(field_key: str, raw: str) -> str:
     return raw
 
 
+def parse_stats_message(text: str) -> dict:
+    """Parse a full stats message (same format as /stats output) into field values.
+    Returns the recognized fields; caller decides if there are enough to treat it
+    as a full clone. Lifetime Volume / Total Deals are ignored (auto-computed)."""
+    patterns = {
+        'total_bought': r'Total Bought:\s*\$?\s*([\d,]+(?:\.\d+)?)',
+        'buy_trades': r'Total Buy Trades:\s*([\d,]+)',
+        'total_sold': r'Total Sold:\s*\$?\s*([\d,]+(?:\.\d+)?)',
+        'sell_trades': r'Total Sell Trades:\s*([\d,]+)',
+        'global_rank': r'Global Rank:\s*#?\s*(\d[\d,]*)',
+    }
+    result = {}
+    for key, pat in patterns.items():
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            result[key] = _format_addstats_value(key, m.group(1))
+    m = re.search(r'Completion Rate:\s*(.+)', text, re.IGNORECASE)
+    if m:
+        result['completion_rate'] = m.group(1).strip()
+    return result
+
+
 def _addstats_lifetime(d: dict):
     """Auto lifetime volume = Total Bought + Total Sold; '—' until either is set."""
     if 'total_bought' not in d and 'total_sold' not in d:
@@ -1930,6 +1952,12 @@ async def addstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             chat_id=update.effective_chat.id,
             text=("⚠️ I don't know this user's Telegram id yet, so these stats won't show in /stats. "
                   "Reply to one of their messages with /addstats, or pass their numeric id."),
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=("💡 Tip: tap a section to fill values one-by-one, or just paste a full stats "
+                  "message (same format) and I'll clone all values to this user."),
         )
 
 
@@ -2249,6 +2277,45 @@ async def process_addstats_input(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.send_message(
             chat_id=session['chat_id'],
             text="✅ Section updated! Tap another section button to continue, or ✅ Done to finish.",
+        )
+
+
+async def apply_addstats_clone(update: Update, context: ContextTypes.DEFAULT_TYPE, session: dict, parsed: dict) -> None:
+    """Apply a pasted full stats message to the session's target and save it."""
+    session['data'].update(parsed)
+    session['awaiting'] = None
+    session['section'] = None
+
+    _persist_addstats(session)
+
+    # Edit the sample message in place with the cloned values
+    try:
+        await context.bot.edit_message_text(
+            chat_id=session['chat_id'],
+            message_id=session['message_id'],
+            text=build_addstats_text(session),
+            parse_mode='HTML',
+            reply_markup=build_addstats_keyboard(),
+        )
+    except Exception as e:
+        logger.warning(f"Could not edit /addstats sample message on clone: {e}")
+
+    # Remove the admin's pasted message to keep the chat clean
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if session.get('target_user_id'):
+        await context.bot.send_message(
+            chat_id=session['chat_id'],
+            text="✅ Stats cloned to the target user. Tap ✅ Done to finish, or a section to edit.",
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=session['chat_id'],
+            text=("⚠️ Stats parsed, but I don't know this user's Telegram id yet, so they won't show in /stats. "
+                  "Restart with a reply to their message or their numeric id."),
         )
 
 
@@ -4768,9 +4835,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     
     # Route input into an active /addstats builder session (admin stats builder)
     _addstats_session = addstats_sessions.get((chat_id, user_id))
-    if _addstats_session and _addstats_session.get('awaiting'):
-        await process_addstats_input(update, context, _addstats_session)
-        return
+    if _addstats_session:
+        # A pasted full stats message (3+ recognized fields) clones everything at once
+        _parsed_stats = parse_stats_message(text)
+        if len(_parsed_stats) >= 3:
+            await apply_addstats_clone(update, context, _addstats_session, _parsed_stats)
+            return
+        if _addstats_session.get('awaiting'):
+            await process_addstats_input(update, context, _addstats_session)
+            return
     
     # Handle !setfees command (admin-only, works in any chat)
     if text.startswith('!setfees'):
