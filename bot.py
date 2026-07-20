@@ -851,7 +851,22 @@ async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     
     seller_username = room_initiators[original_chat_id].get('seller', "Unknown")
-    
+
+    # Only the seller may use /release
+    deal_data = database.get_deal(original_chat_id)
+    seller_user_id = deal_data.get('seller_user_id') if deal_data else None
+    is_seller = False
+    if seller_user_id and user.id == seller_user_id:
+        is_seller = True
+    elif user.username and seller_username and user.username.lower() == seller_username.lower():
+        is_seller = True
+    if not is_seller:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Only the seller can use /release."
+        )
+        return
+
     # Initialize release approvals - only seller needs to approve now
     release_approvals[original_chat_id] = {'seller': 'waiting'}
     
