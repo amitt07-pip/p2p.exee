@@ -4747,9 +4747,13 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
     service_fee_formatted = format_fee_percent(service_fee_percent)
     release_amount_formatted = f"{release_amount:.1f} {coin}"
     
-    # Build approval status strings
-    buyer_status = f"✅ @{buyer_username} has approved." if buyer_approved else f"⏳ Waiting for @{buyer_username} to approve."
-    seller_status = f"✅ @{seller_username} has approved." if seller_approved else f"⏳ Waiting for @{seller_username} to approve."
+    # Build approval status: a single line once both parties have approved
+    if buyer_approved and seller_approved:
+        approval_status = "✅ Both parties have approved."
+    else:
+        buyer_status = f"✅ @{buyer_username} has approved." if buyer_approved else f"⏳ Waiting for @{buyer_username} to approve."
+        seller_status = f"✅ @{seller_username} has approved." if seller_approved else f"⏳ Waiting for @{seller_username} to approve."
+        approval_status = f"{buyer_status}\n{seller_status}"
     
     deal_text = f"""📋  <b>Deal Summary</b>
 
@@ -4765,8 +4769,7 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
 
 🛑 <b>Do not send funds here</b> 🛑
 
-{buyer_status}
-{seller_status}"""
+{approval_status}"""
     
     return deal_text
 
