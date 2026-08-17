@@ -45,6 +45,11 @@ DEAL_STATUS_COMPLETED = 'completed'
 DEAL_STATUS_CANCELLED = 'cancelled'
 DEAL_STATUS_EXPIRED = 'expired'
 
+# Human-facing Trade ID shown in the deal summary (e.g. #P2PMMX5090), assigned
+# sequentially per deal starting at TRADE_ID_START.
+TRADE_ID_PREFIX = 'P2PMMX'
+TRADE_ID_START = 5090
+
 
 def get_db_connection():
     """Get database connection from DATABASE_URL environment variable"""
@@ -121,7 +126,11 @@ def init_database():
                 room_number INTEGER,
 
                 -- Admin override: fix deposit to 'owner' or 'ceo' wallet
-                fixed_wallet_role TEXT
+                fixed_wallet_role TEXT,
+
+                -- Sequential human-facing trade id (e.g. P2PMMX5090)
+                trade_id TEXT,
+                trade_seq INTEGER
             )
         """)
         
@@ -154,6 +163,8 @@ def init_database():
             ("room_name", "TEXT"),
             ("room_number", "INTEGER"),
             ("fixed_wallet_role", "TEXT"),
+            ("trade_id", "TEXT"),
+            ("trade_seq", "INTEGER"),
         ]
         
         for col_name, col_type in columns_to_add:
@@ -341,6 +352,38 @@ def update_deal(chat_id: int, **kwargs) -> bool:
     except Exception as e:
         logger.warning(f"Could not update deal: {e}")
         return False
+
+
+def assign_trade_id(chat_id: int) -> Optional[str]:
+    """
+    Return the deal's Trade ID, assigning the next sequential one (starting at
+    TRADE_ID_START) the first time it's requested. Idempotent per deal.
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE deals
+            SET trade_seq = COALESCE((SELECT MAX(trade_seq) + 1 FROM deals), %s),
+                trade_id = %s || COALESCE((SELECT MAX(trade_seq) + 1 FROM deals), %s)::text,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE chat_id = %s AND trade_id IS NULL
+            RETURNING trade_id
+        """, (TRADE_ID_START, TRADE_ID_PREFIX, TRADE_ID_START, chat_id))
+        row = cur.fetchone()
+        if row is None:
+            cur.execute("SELECT trade_id FROM deals WHERE chat_id = %s", (chat_id,))
+            row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.warning(f"Could not assign trade id: {e}")
+        return None
 
 
 def set_roles(chat_id: int, buyer_username: str, seller_username: str,

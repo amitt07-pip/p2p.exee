@@ -4755,8 +4755,11 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
         seller_status = f"✅ @{seller_username} has approved." if seller_approved else f"⏳ Waiting for @{seller_username} to approve."
         approval_status = f"{buyer_status}\n{seller_status}"
     
+    trade_id = database.assign_trade_id(chat_id) or f"{database.TRADE_ID_PREFIX}{database.TRADE_ID_START}"
+
     deal_text = f"""📋  <b>Deal Summary</b>
 
+• <b>Trade ID:</b> #{trade_id}
 • <b>Amount:</b> {amount_formatted} {coin}
 • <b>Rate:</b> {rate_formatted}
 • <b>Payment:</b> {payment_method}
