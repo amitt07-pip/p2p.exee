@@ -47,8 +47,13 @@ DELETE_QUEUE_FILE = "delete_requests.json"
 deal_rooms = {}
 client = None
 
+# Room numbers stay within this inclusive range and wrap back to the minimum.
+ROOM_NUMBER_MIN = 1
+ROOM_NUMBER_MAX = 20
+
+
 def get_next_room_number():
-    """Get the next room number - cycles from 40 to 60, then restarts from 40"""
+    """Get the next room number - cycles from 1 to 20, then restarts from 1"""
     global room_counter
     try:
         room_info_file = "deal_rooms.json"
@@ -58,17 +63,14 @@ def get_next_room_number():
             if room_info:
                 max_room = max(info.get('room_number', 0) for info in room_info.values())
                 next_room = max_room + 1
-                # Cycle: if next_room > 60, restart from 40
-                if next_room > 60:
-                    next_room = 40
-                # Ensure minimum is 40
-                if next_room < 40:
-                    next_room = 40
+                # Keep the number inside 1..20, wrapping back to 1
+                if next_room > ROOM_NUMBER_MAX or next_room < ROOM_NUMBER_MIN:
+                    next_room = ROOM_NUMBER_MIN
                 return next_room
-        return 40  # Default starting point
+        return ROOM_NUMBER_MIN  # Default starting point
     except Exception as e:
         logger.warning(f"Could not read room numbers: {e}")
-        return 40
+        return ROOM_NUMBER_MIN
 
 # Initialize room counter from existing rooms
 room_counter = get_next_room_number()
@@ -278,7 +280,7 @@ async def create_deal_room(client, initiator_username, counterparty_username, bo
     try:
         room_name = f"MM ROOM {room_counter}"
         room_number = room_counter
-        room_counter += 1
+        room_counter = room_counter + 1 if room_counter < ROOM_NUMBER_MAX else ROOM_NUMBER_MIN
         
         logger.info(f"Creating deal room: {room_name}")
         
