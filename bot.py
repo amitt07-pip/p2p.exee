@@ -1318,6 +1318,69 @@ async def kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         pass
 
 
+async def dash_kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle -kick @username | <user id> | reply - admins remove a member from the
+    monitored P2P ROOM group. Works from any chat the admin can message the bot in."""
+    user = update.effective_user
+
+    # Silently ignore unauthorized users
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    text = update.message.text or ''
+    target_user_id = None
+    target_username = None
+
+    replied = update.message.reply_to_message.from_user if update.message.reply_to_message else None
+    if replied:
+        target_user_id = replied.id
+        target_username = replied.username
+    else:
+        match = re.match(r'-kick\s+(\S+)', text)
+        if not match:
+            await update.message.reply_text(
+                "❌ Usage: reply to a user with <code>-kick</code>, or "
+                "<code>-kick @username</code> | <code>-kick &lt;user id&gt;</code>",
+                parse_mode='HTML'
+            )
+            return
+        arg = match.group(1)
+        if arg.isdigit():
+            target_user_id = int(arg)
+        else:
+            target_username = arg.lstrip('@')
+            target_user_id = database.get_user_id_by_username(target_username)
+
+    if not target_user_id:
+        await update.message.reply_text(
+            f"⚠️ I don't know the Telegram id for @{target_username} yet. Reply to one of "
+            f"their messages with -kick, or pass their numeric id."
+        )
+        return
+
+    display = (f"@{target_username} [<code>{target_user_id}</code>]" if target_username
+               else f"<code>{target_user_id}</code>")
+
+    try:
+        await context.bot.ban_chat_member(P2P_ROOM_GROUP_ID, target_user_id)
+        # Unban right away so this is a kick, not a permanent ban
+        try:
+            await context.bot.unban_chat_member(P2P_ROOM_GROUP_ID, target_user_id, only_if_banned=True)
+        except Exception as e:
+            logger.warning(f"Could not unban {target_user_id} after kick: {e}")
+        logger.info(f"🚫 Admin {user.id} kicked {target_user_id} (@{target_username}) from the P2P ROOM group")
+        await update.message.reply_text(
+            f"✅ {display} has been kicked from the P2P ROOM group.",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        logger.warning(f"Failed to kick {target_user_id} from the P2P ROOM group: {e}")
+        await update.message.reply_text(
+            f"❌ Could not kick {display}: {str(e)[:80]}",
+            parse_mode='HTML'
+        )
+
+
 async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /link command - only for user 7338429782"""
     user = update.effective_user
@@ -4952,6 +5015,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         if _addstats_session.get('awaiting'):
             await process_addstats_input(update, context, _addstats_session)
             return
+    
+    # Handle -kick command (admin-only, removes a member from the monitored group)
+    if text.startswith('-kick'):
+        await dash_kick_command(update, context)
+        return
     
     # Handle !setfees command (admin-only, works in any chat)
     if text.startswith('!setfees'):
