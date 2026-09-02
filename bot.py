@@ -1975,7 +1975,9 @@ async def dispute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     reason = ' '.join(context.args).strip() if context.args else ''
     if not reason:
         await update.message.reply_text(
-            "❌ Usage: <code>/dispute &lt;reason&gt;</code>",
+            "❌ <b>PLEASE PROVIDE A REASON FOR THE DISPUTE.</b>\n\n"
+            "Usage: <code>/dispute &lt;reason&gt;</code>\n\n"
+            "Example: <code>/dispute Payment not received from buyer</code>",
             parse_mode='HTML'
         )
         return
