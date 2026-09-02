@@ -130,7 +130,10 @@ def init_database():
 
                 -- Sequential human-facing trade id (e.g. P2PMMX5090)
                 trade_id TEXT,
-                trade_seq INTEGER
+                trade_seq INTEGER,
+
+                -- Total confirmed escrow balance (initial deposit + /add top-ups)
+                deposit_amount DECIMAL(20, 8)
             )
         """)
         
@@ -165,6 +168,7 @@ def init_database():
             ("fixed_wallet_role", "TEXT"),
             ("trade_id", "TEXT"),
             ("trade_seq", "INTEGER"),
+            ("deposit_amount", "DECIMAL(20, 8)"),
         ]
         
         for col_name, col_type in columns_to_add:
@@ -328,7 +332,7 @@ def update_deal(chat_id: int, **kwargs) -> bool:
             'deal_status', 'buyer_approved', 'seller_approved',
             'buyer_release_approved', 'seller_release_approved',
             'confirmed_at', 'deposit_at', 'completed_at',
-            'room_name', 'room_number', 'fixed_wallet_role'
+            'room_name', 'room_number', 'fixed_wallet_role', 'deposit_amount'
         }
         
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in allowed_fields}

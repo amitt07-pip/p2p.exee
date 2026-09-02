@@ -169,6 +169,7 @@ payment_confirmations = {}  # Track payment confirmations: {chat_id: {'sent': bo
 room_awaiting_hash = {}  # Track which rooms are awaiting transaction hash: {chat_id: 'awaiting_hash'}
 room_creation_times = {}  # Track when each room was created for time calculation: {chat_id: timestamp}
 room_confirmed_deposits = {}  # Track confirmed deposits: {chat_id: amount}
+room_used_tx_hashes = {}  # Transaction hashes already credited per room: {chat_id: set(hash.lower())}
 room_log_messages = {}  # Track room log message IDs: {chat_id: {'msg_id': int, 'chat_id': int}}
 added_member_log_messages = {}  # Track "added by admin" log messages: {(chat_id, user_id): {'msg_id': int, 'text': str}}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
@@ -616,6 +617,12 @@ def restore_active_deals_state():
             # Release approval (seller-tracked)
             if deal.get('seller_release_approved'):
                 release_approvals[chat_id] = {'seller': 'approved'}
+
+            # Confirmed escrow balance (initial deposit + /add top-ups)
+            if deal.get('deposit_amount') is not None:
+                room_confirmed_deposits[chat_id] = float(deal['deposit_amount'])
+            if deal.get('tx_hash'):
+                room_used_tx_hashes.setdefault(chat_id, set()).add(deal['tx_hash'].lower())
 
             # Best-effort transaction state from the persisted deal status
             if status == database.DEAL_STATUS_RELEASE_PENDING:
@@ -1863,6 +1870,77 @@ This is the current available balance for this trade."""
     
     await update.message.reply_text(balance_text, parse_mode='HTML')
     logger.info(f"✅ Sent balance info to room {original_chat_id}: {amount_formatted} {token}, release: {release_amount_formatted} {token}")
+
+
+async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /add - ask for an additional deposit into the deal's escrow.
+    Only available once the deposit has been confirmed (payment received)."""
+    user = update.effective_user
+    logger.info(f"💰 /add command by user {user.id}")
+
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ This command can only be used inside a group.")
+        return
+
+    original_chat_id = normalize_chat_id(update.effective_chat.id)
+    send_chat_id = -1000000000000 - original_chat_id
+
+    deal = database.get_deal(original_chat_id)
+    status = deal.get('deal_status') if deal else None
+    deposit_confirmed = (
+        original_chat_id in room_confirmed_deposits
+        or status in (
+            database.DEAL_STATUS_DEPOSIT_RECEIVED,
+            database.DEAL_STATUS_COMPLETED,
+        )
+    )
+    if not deposit_confirmed:
+        logger.info(f"❌ /add before deposit confirmed in room {original_chat_id}")
+        await update.message.reply_text(
+            "❌ add command is only available after the deposit has been confirmed by the bot."
+        )
+        return
+
+    escrow_address = deal.get('escrow_address') if deal else None
+    if not escrow_address:
+        await update.message.reply_text("❌ Escrow address not found for this deal.")
+        return
+
+    coin = user_coins.get(original_chat_id) or (deal.get('coin') if deal else None) or 'USDT'
+    network = user_blockchain.get(original_chat_id) or (deal.get('network') if deal else None) or 'BSC'
+    seller_username = (
+        room_initiators.get(original_chat_id, {}).get('seller')
+        or (deal.get('seller_username') if deal else None)
+    )
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    add_funds_text = (
+        f"💰 <b>ADD MORE FUNDS</b>\n\n"
+        f"To deposit additional funds, send {coin} to:\n\n"
+        f"<code>{escrow_address}</code>\n\n"
+        f"Network: {network}\n\n"
+        f"⚠️ <b>After sending, please paste the Transaction Hash (TXID) here to "
+        f"automatically update the balance.</b>"
+    )
+    await context.bot.send_message(
+        chat_id=send_chat_id,
+        text=add_funds_text,
+        parse_mode='HTML'
+    )
+
+    seller_display = f"@{seller_username}" if seller_username else "Seller"
+    await context.bot.send_message(
+        chat_id=send_chat_id,
+        text=f"✉️ {seller_display} kindly paste the transaction hash or explorer link.",
+        parse_mode='HTML'
+    )
+
+    room_transaction_state[original_chat_id] = 'awaiting_add_hash'
+    logger.info(f"💰 /add started in room {original_chat_id} - awaiting extra deposit hash")
 
 
 # ============================================================================
@@ -5455,7 +5533,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     database.record_deposit(original_chat_id, tx_hash)
                     
                     # Track confirmed deposit for /balance command (use deal amount for master hash)
-                    room_confirmed_deposits[original_chat_id] = amount
+                    room_confirmed_deposits[original_chat_id] = float(amount)
+                    room_used_tx_hashes.setdefault(original_chat_id, set()).add(tx_hash.lower())
+                    database.update_deal(original_chat_id, deposit_amount=float(amount))
                     logger.info(f"💰 Confirmed deposit tracked for room {original_chat_id}: {amount}")
                     
                     # Send payment received message
@@ -5493,7 +5573,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     logger.info(f"✅ Transaction verified! Received amount: {received_amount} {coin or 'USDT'}")
                     
                     # Track confirmed deposit for /balance command
-                    room_confirmed_deposits[original_chat_id] = received_amount
+                    room_confirmed_deposits[original_chat_id] = float(received_amount)
+                    room_used_tx_hashes.setdefault(original_chat_id, set()).add(tx_hash.lower())
+                    database.update_deal(original_chat_id, deposit_amount=float(received_amount))
                     logger.info(f"💰 Confirmed deposit tracked for room {original_chat_id}: {received_amount}")
                     
                     # Get seller's address that was provided earlier
@@ -5568,6 +5650,125 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 logger.warning(f"❌ Error processing transaction hash: {e}")
                 # Send error message to group instead of replying to deleted message
                 send_chat_id = -1000000000000 - original_chat_id
+                await context.bot.send_message(
+                    chat_id=send_chat_id,
+                    text=f"❌ Error: {str(e)}"
+                )
+                return
+
+        # Extra deposit requested via /add - verify and top up the escrow balance
+        elif room_transaction_state.get(original_chat_id) == 'awaiting_add_hash':
+            # Only the seller provides the transaction hash
+            if original_chat_id in room_initiators:
+                seller_username = room_initiators[original_chat_id].get('seller')
+                if seller_username and user.username and user.username.lower() != seller_username.lower():
+                    logger.info(f"⏭️ Ignoring /add hash from {user.username} (not seller) in room {original_chat_id}")
+                    return
+
+            send_chat_id = -1000000000000 - original_chat_id
+
+            try:
+                tx_input = text.strip()
+                if 'bscscan.com/tx/' in tx_input or 'etherscan.io/tx/' in tx_input:
+                    tx_hash = tx_input.split('tx/')[-1].split('?')[0].strip()
+                    logger.info(f"🔗 Extracted hash from link: {tx_hash[:10]}...")
+                else:
+                    tx_hash = tx_input
+
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
+
+                deal_data = database.get_deal(original_chat_id)
+                escrow_address = deal_data.get('escrow_address') if deal_data else None
+                if not escrow_address:
+                    logger.error(f"❌ Escrow not found for room {original_chat_id}")
+                    await context.bot.send_message(
+                        chat_id=send_chat_id,
+                        text="❌ Escrow address not found. Please contact support."
+                    )
+                    return
+
+                blockchain = (
+                    user_blockchain.get(original_chat_id)
+                    or (deal_data.get('network') if deal_data else None)
+                    or 'BSC'
+                )
+                coin = (
+                    user_coins.get(original_chat_id)
+                    or (deal_data.get('coin') if deal_data else None)
+                    or 'USDT'
+                )
+
+                # A hash may only be credited to a room once
+                used_hashes = room_used_tx_hashes.setdefault(original_chat_id, set())
+                if deal_data and deal_data.get('tx_hash'):
+                    used_hashes.add(deal_data['tx_hash'].lower())
+                if tx_hash.lower() in used_hashes:
+                    await context.bot.send_message(
+                        chat_id=send_chat_id,
+                        text="❌ This transaction hash has already been credited to this deal."
+                    )
+                    logger.warning(f"❌ Duplicate /add hash in room {original_chat_id}: {tx_hash[:10]}...")
+                    return
+
+                if blockchain == 'TRON':
+                    verify_result = await verify_transaction_tron(tx_hash, escrow_address, token=coin)
+                else:
+                    verify_result = await verify_transaction_bscscan(tx_hash, escrow_address, token=coin)
+
+                if not verify_result['valid']:
+                    error_msg = verify_result['error'] or "❌ Transaction verification failed"
+                    await context.bot.send_message(
+                        chat_id=send_chat_id,
+                        text=error_msg
+                    )
+                    logger.warning(f"❌ /add verification failed in room {original_chat_id}: {error_msg}")
+                    return
+
+                extra_amount = float(verify_result['amount'])
+                previous_balance = float(room_confirmed_deposits.get(original_chat_id, 0) or 0)
+                new_balance = previous_balance + extra_amount
+
+                room_confirmed_deposits[original_chat_id] = new_balance
+                used_hashes.add(tx_hash.lower())
+                database.update_deal(original_chat_id, deposit_amount=new_balance)
+                logger.info(
+                    f"💰 /add credited {extra_amount} {coin} to room {original_chat_id} "
+                    f"- new balance {new_balance}"
+                )
+
+                seller_addr = seller_addresses.get(original_chat_id, verify_result['from_address'])
+                await send_deposit_found_message(
+                    context.bot,
+                    send_chat_id,
+                    f"{extra_amount}",
+                    seller_addr,
+                    verify_result['to_address'],
+                    tx_hash,
+                    block_number=verify_result['block_number']
+                )
+
+                await update_room_log_status(
+                    context.bot, original_chat_id, f"Deposit Received [{new_balance}]"
+                )
+
+                await context.bot.send_message(
+                    chat_id=send_chat_id,
+                    text=(
+                        "✅ <b>Additional Funds Received!</b>\n\n"
+                        f"<b>Added:</b> {extra_amount} {coin}\n"
+                        f"<b>New Balance:</b> {new_balance} {coin}"
+                    ),
+                    parse_mode='HTML'
+                )
+
+                room_transaction_state.pop(original_chat_id, None)
+                return
+
+            except Exception as e:
+                logger.warning(f"❌ Error processing /add transaction hash: {e}")
                 await context.bot.send_message(
                     chat_id=send_chat_id,
                     text=f"❌ Error: {str(e)}"
@@ -6427,6 +6628,7 @@ def main() -> None:
     application.add_handler(CommandHandler("setaddy", setaddy_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("balance", balance_command))
+    application.add_handler(CommandHandler("add", add_command))
     application.add_handler(CommandHandler("verify", verify_command))
     application.add_handler(CommandHandler("close", close_command))
     application.add_handler(CommandHandler("resetrooms", resetrooms_command))
