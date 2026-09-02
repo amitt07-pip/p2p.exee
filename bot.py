@@ -5,6 +5,7 @@ A simple peer-to-peer marketplace with escrow functionality
 """
 
 import os
+import html
 import logging
 import json
 import asyncio
@@ -1941,6 +1942,55 @@ async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     room_transaction_state[original_chat_id] = 'awaiting_add_hash'
     logger.info(f"💰 /add started in room {original_chat_id} - awaiting extra deposit hash")
+
+
+async def dispute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /dispute <reason> - report a dispute for admin review.
+    Only available once the deposit has been confirmed."""
+    user = update.effective_user
+    logger.info(f"⚖️ /dispute command by user {user.id}")
+
+    if update.effective_chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ This command can only be used inside a group.")
+        return
+
+    original_chat_id = normalize_chat_id(update.effective_chat.id)
+
+    deal = database.get_deal(original_chat_id)
+    status = deal.get('deal_status') if deal else None
+    deposit_confirmed = (
+        original_chat_id in room_confirmed_deposits
+        or status in (
+            database.DEAL_STATUS_DEPOSIT_RECEIVED,
+            database.DEAL_STATUS_COMPLETED,
+        )
+    )
+    if not deposit_confirmed:
+        logger.info(f"❌ /dispute before deposit confirmed in room {original_chat_id}")
+        await update.message.reply_text(
+            "❌ dispute command is only available after the deposit has been confirmed by the bot."
+        )
+        return
+
+    reason = ' '.join(context.args).strip() if context.args else ''
+    if not reason:
+        await update.message.reply_text(
+            "❌ Usage: <code>/dispute &lt;reason&gt;</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    dispute_text = (
+        "✅ <b>Dispute reported successfully!</b>\n\n"
+        "An admin will review your dispute and join this group to resolve the issue.\n\n"
+        f"<b>Reason:</b> {html.escape(reason)}"
+    )
+    await context.bot.send_message(
+        chat_id=-1000000000000 - original_chat_id,
+        text=dispute_text,
+        parse_mode='HTML'
+    )
+    logger.info(f"⚖️ Dispute reported in room {original_chat_id} by {user.id}: {reason[:80]}")
 
 
 # ============================================================================
@@ -6629,6 +6679,7 @@ def main() -> None:
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("add", add_command))
+    application.add_handler(CommandHandler("dispute", dispute_command))
     application.add_handler(CommandHandler("verify", verify_command))
     application.add_handler(CommandHandler("close", close_command))
     application.add_handler(CommandHandler("resetrooms", resetrooms_command))
