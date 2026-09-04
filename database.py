@@ -230,6 +230,19 @@ def init_database():
             )
         """)
         
+        # Backup escrow wallets set per room number via /setfakeaddy, applied to a
+        # room's deposit with /fakeaddy.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS room_backup_wallets (
+                room_number INTEGER NOT NULL,
+                token TEXT NOT NULL,
+                wallet_address TEXT NOT NULL,
+                updated_by BIGINT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (room_number, token)
+            )
+        """)
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -694,6 +707,99 @@ def is_room_number_available(room_number: int) -> bool:
     except Exception as e:
         logger.warning(f"Could not check room number availability: {e}")
         return False
+
+
+def set_room_backup_wallet(room_number: int, token: str, wallet_address: str, updated_by: int = None) -> bool:
+    """Store a backup escrow address for a room number + token (BSC)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO room_backup_wallets (room_number, token, wallet_address, updated_by, updated_at)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (room_number, token) DO UPDATE SET
+                wallet_address = EXCLUDED.wallet_address,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = CURRENT_TIMESTAMP
+        """, (room_number, token.upper(), wallet_address, updated_by))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Could not save room backup wallet: {e}")
+        return False
+
+
+def get_room_backup_wallet(room_number: int, token: str) -> Optional[str]:
+    """Get the backup escrow address stored for a room number + token."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT wallet_address FROM room_backup_wallets
+            WHERE room_number = %s AND token = %s
+        """, (room_number, token.upper()))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        return row[0] if row else None
+    except Exception as e:
+        logger.warning(f"Could not get room backup wallet: {e}")
+        return None
+
+
+def get_room_backup_wallets(room_number: int) -> Dict[str, str]:
+    """Get all backup escrow addresses stored for a room number, keyed by token."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {}
+
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT token, wallet_address FROM room_backup_wallets
+            WHERE room_number = %s
+        """, (room_number,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return {row[0]: row[1] for row in rows}
+    except Exception as e:
+        logger.warning(f"Could not get room backup wallets: {e}")
+        return {}
+
+
+def get_backup_wallet_rooms(wallet_address: str) -> List[Dict[str, Any]]:
+    """Rooms/tokens a backup escrow address is stored for (case-insensitive)."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT room_number, token FROM room_backup_wallets
+            WHERE LOWER(wallet_address) = LOWER(%s)
+            ORDER BY room_number
+        """, (wallet_address,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.warning(f"Could not look up backup wallet rooms: {e}")
+        return []
 
 
 def get_deals_by_user(username: str) -> List[Dict[str, Any]]:

