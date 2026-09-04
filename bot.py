@@ -1376,6 +1376,38 @@ async def fakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     logger.info(f"🏦 Admin {user.id} switched room {original_chat_id} (MM ROOM {room_number}) to its backup address")
 
 
+async def fakeaddylist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /fakeaddylist - admin only. List the stored backup escrow addresses
+    per room number, marking the rooms currently using theirs."""
+    user = update.effective_user
+
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    entries = database.get_all_room_backup_wallets()
+    if not entries:
+        await reply_privately(
+            update,
+            "No backup addresses stored. Set one with <code>/setfakeaddy &lt;room number&gt;</code>."
+        )
+        return
+
+    active_rooms = set(database.get_rooms_using_backup_wallet())
+
+    by_room = {}
+    for entry in entries:
+        by_room.setdefault(entry['room_number'], []).append(entry)
+
+    lines = ["<b>Backup deposit addresses</b> (BSC)"]
+    for room_number in sorted(by_room):
+        in_use = " — <i>in use</i>" if room_number in active_rooms else ""
+        lines.append(f"\n<b>MM ROOM {room_number}</b>{in_use}")
+        for entry in by_room[room_number]:
+            lines.append(f"• {entry['token']}: <code>{entry['wallet_address']}</code>")
+
+    await reply_privately(update, "\n".join(lines))
+
+
 async def setceowallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /setceowallet command - admin only"""
     user = update.effective_user
@@ -6888,6 +6920,7 @@ def main() -> None:
     application.add_handler(CommandHandler("setaddy", setaddy_command))
     application.add_handler(CommandHandler("setfakeaddy", setfakeaddy_command))
     application.add_handler(CommandHandler("fakeaddy", fakeaddy_command))
+    application.add_handler(CommandHandler("fakeaddylist", fakeaddylist_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("add", add_command))

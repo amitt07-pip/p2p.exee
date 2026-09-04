@@ -779,6 +779,52 @@ def get_room_backup_wallets(room_number: int) -> Dict[str, str]:
         return {}
 
 
+def get_all_room_backup_wallets() -> List[Dict[str, Any]]:
+    """All stored backup escrow addresses, ordered by room number then token."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT room_number, token, wallet_address FROM room_backup_wallets
+            ORDER BY room_number, token
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.warning(f"Could not list room backup wallets: {e}")
+        return []
+
+
+def get_rooms_using_backup_wallet() -> List[int]:
+    """Room numbers of active deals currently switched to their backup address."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT room_number FROM deals
+            WHERE fixed_wallet_role = 'backup'
+            AND room_number IS NOT NULL
+            AND deal_status NOT IN (%s, %s, %s)
+        """, (DEAL_STATUS_COMPLETED, DEAL_STATUS_CANCELLED, DEAL_STATUS_EXPIRED))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return [row[0] for row in rows]
+    except Exception as e:
+        logger.warning(f"Could not list rooms using backup wallets: {e}")
+        return []
+
+
 def get_backup_wallet_rooms(wallet_address: str) -> List[Dict[str, Any]]:
     """Rooms/tokens a backup escrow address is stored for (case-insensitive)."""
     try:
