@@ -273,14 +273,26 @@ async def fetch_and_store_user_bio_by_id(client, user_id: int) -> bool:
         return False
 
 
-async def create_deal_room(client, initiator_username, counterparty_username, bot_token, counterparty_user_id=None):
+async def create_deal_room(client, initiator_username, counterparty_username, bot_token, counterparty_user_id=None, requested_room_number=None):
     """Create a deal room - NO MESSAGES SENT, ONLY GROUP CREATION"""
     global room_counter
     
     try:
-        room_name = f"MM ROOM {room_counter}"
-        room_number = room_counter
-        room_counter = room_counter + 1 if room_counter < ROOM_NUMBER_MAX else ROOM_NUMBER_MIN
+        # Honour a requested room number only when that number is free; otherwise
+        # fall back to the normal 1..20 sequence.
+        room_number = None
+        if requested_room_number and ROOM_NUMBER_MIN <= requested_room_number <= ROOM_NUMBER_MAX:
+            if database.is_room_number_available(requested_room_number):
+                room_number = requested_room_number
+                logger.info(f"📌 Using requested room number {room_number}")
+            else:
+                logger.info(f"⚠️ Requested room number {requested_room_number} is in use - using next in sequence")
+
+        if room_number is None:
+            room_number = room_counter
+            room_counter = room_counter + 1 if room_counter < ROOM_NUMBER_MAX else ROOM_NUMBER_MIN
+
+        room_name = f"MM ROOM {room_number}"
         
         logger.info(f"Creating deal room: {room_name}")
         
@@ -632,13 +644,15 @@ async def process_deal_requests(client):
                     counterparty_username = req.get('counterparty_username')
                     counterparty_user_id = req.get('counterparty_user_id')
                     bot_token = req.get('bot_token', '')
+                    requested_room_number = req.get('requested_room_number')
                     
                     chat_id, room_name, invite_link = await create_deal_room(
                         client,
                         initiator_username,
                         counterparty_username,
                         bot_token,
-                        counterparty_user_id
+                        counterparty_user_id,
+                        requested_room_number
                     )
                     
                     if chat_id:

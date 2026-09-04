@@ -673,6 +673,29 @@ def get_active_deals() -> List[Dict[str, Any]]:
         return []
 
 
+def is_room_number_available(room_number: int) -> bool:
+    """True when no active deal is currently using this room number."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) FROM deals
+            WHERE room_number = %s AND deal_status NOT IN (%s, %s, %s)
+        """, (room_number, DEAL_STATUS_COMPLETED, DEAL_STATUS_CANCELLED, DEAL_STATUS_EXPIRED))
+
+        count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+
+        return count == 0
+    except Exception as e:
+        logger.warning(f"Could not check room number availability: {e}")
+        return False
+
+
 def get_deals_by_user(username: str) -> List[Dict[str, Any]]:
     """Get all deals where user is buyer or seller"""
     try:

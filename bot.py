@@ -187,6 +187,10 @@ PREMIUM_EMOJI_USER = "6300827421071378088"
 # The P2P ROOM group whose member add/leave events are tracked (/list) and logged.
 P2P_ROOM_GROUP_ID = -1004489418013
 
+# Valid room numbers (mirrors the userbot's range) for /room <number> requests.
+ROOM_NUMBER_MIN = 1
+ROOM_NUMBER_MAX = 20
+
 
 def premium_emoji(emoji_id: str, fallback: str) -> str:
     """Wrap a fallback emoji in a Telegram custom-emoji tag (HTML parse mode)."""
@@ -658,7 +662,7 @@ def mark_existing_rooms_processed():
         logger.warning(f"Error marking existing rooms: {e}")
 
 
-def write_deal_request(initiator_id, initiator_username, counterparty_username, initiator_chat_id, counterparty_user_id=None):
+def write_deal_request(initiator_id, initiator_username, counterparty_username, initiator_chat_id, counterparty_user_id=None, requested_room_number=None):
     """Write a deal request to the queue for userbot to process"""
     try:
         requests = []
@@ -678,6 +682,10 @@ def write_deal_request(initiator_id, initiator_username, counterparty_username, 
         # Add counterparty_user_id if provided (when user has no username)
         if counterparty_user_id:
             request_data['counterparty_user_id'] = counterparty_user_id
+
+        # Preferred room number (used only if that number is free)
+        if requested_room_number:
+            request_data['requested_room_number'] = requested_room_number
         
         requests.append(request_data)
         
@@ -980,6 +988,15 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
     
+    # Optional preferred room number: /room @username 18 or /room <user id> 18.
+    # It's only honoured if that number is free; otherwise the normal sequence is used.
+    requested_room_number = None
+    command_parts = message_text.split()
+    if len(command_parts) >= 3 and command_parts[2].isdigit():
+        candidate = int(command_parts[2])
+        if ROOM_NUMBER_MIN <= candidate <= ROOM_NUMBER_MAX:
+            requested_room_number = candidate
+
     initiator_chat_id = update.effective_chat.id
     
     # Delete the user's command message
@@ -989,7 +1006,7 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         pass
     
     # Queue the deal request for userbot to process
-    if write_deal_request(user.id, user.username or user.first_name, counterparty_username, initiator_chat_id, counterparty_user_id):
+    if write_deal_request(user.id, user.username or user.first_name, counterparty_username, initiator_chat_id, counterparty_user_id, requested_room_number):
         if counterparty_username:
             logger.info(f"📋 /room command: {user.username or user.first_name} -> @{counterparty_username}")
         else:
