@@ -175,6 +175,7 @@ room_log_messages = {}  # Track room log message IDs: {chat_id: {'msg_id': int, 
 added_member_log_messages = {}  # Track "added by admin" log messages: {(chat_id, user_id): {'msg_id': int, 'text': str}}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
 current_fee_percent = 0.0  # Global service fee (set via !setfees command, default 0%)
+NETWORK_FEE_BSC = 0.5  # Flat network fee on BSC, in the deal's token (USDT/USDC)
 
 # Admin user IDs who can use admin commands like /setownerwallet
 ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069, 7629970378, 7300655160}
@@ -2056,11 +2057,10 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     network = user_blockchain.get(original_chat_id, "N/A")
     
     # Calculate fees and release amount (same logic as deal summary)
-    # Network fee: 3.0 for TRON, 0.2 for BSC
     if network == 'TRON':
         network_fee = 3.0
     else:
-        network_fee = 0.2
+        network_fee = NETWORK_FEE_BSC
     
     # Service fee: Use global fee if set via !setfees, otherwise per-room fee tier
     service_fee_percent = get_service_fee_percent(original_chat_id)
@@ -3239,7 +3239,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if chain == 'TRON':
                 network_fee = 3.0
             else:  # BSC
-                network_fee = 0.2
+                network_fee = NETWORK_FEE_BSC
             
             # Use global service fee set via !setfees
             service_fee_percent = current_fee_percent
@@ -3783,7 +3783,7 @@ Release has been declined by the seller."""
                 if chain == 'TRON':
                     network_fee = 3.0
                 else:  # BSC
-                    network_fee = 0.2
+                    network_fee = NETWORK_FEE_BSC
                 
                 # Get service fee: Use global fee if set via !setfees, otherwise per-room fee tier
                 service_fee_percent = get_service_fee_percent(chat_id)
@@ -4926,7 +4926,7 @@ async def send_step4_amount_message(bot, send_chat_id: int, chat_id: int) -> Non
         if selected_chain == 'TRON':
             network_fee = 3
         else:  # BSC
-            network_fee = 0.2
+            network_fee = NETWORK_FEE_BSC
         
         step4_text = (
             f"<b>💰 Step 4 - Enter {selected_coin} Amount</b>\n\n"
@@ -5153,7 +5153,7 @@ def build_deal_summary_text(chat_id: int, buyer_approved: bool = False, seller_a
     if chain == 'TRON':
         network_fee = 3.0
     else:  # BSC
-        network_fee = 0.2
+        network_fee = NETWORK_FEE_BSC
     
     # Get service fee: Use global fee if set via !setfees, otherwise per-room fee tier
     service_fee_percent = get_service_fee_percent(chat_id)
