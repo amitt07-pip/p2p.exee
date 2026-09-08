@@ -37,6 +37,15 @@ try:
     CRYPTOGRAPHY_AVAILABLE = True
 except ImportError:
     CRYPTOGRAPHY_AVAILABLE = False
+
+# Telethon is only needed to log a backup userbot account in from /newubot.
+try:
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.errors import SessionPasswordNeededError
+    TELETHON_AVAILABLE = True
+except ImportError:
+    TELETHON_AVAILABLE = False
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
     Application,
@@ -237,6 +246,10 @@ pending_wallet_set = {}
 
 # Pending /setfakeaddy requests awaiting an address: {user_id: {'room_number','token'}}
 pending_fake_addy = {}
+
+# Backup userbot logins in progress from /newubot:
+# {user_id: {'client','label','api_id','api_hash','phone','code_hash','step'}}
+pending_userbot_login = {}
 
 # Wallet rotation index (alternates between owner and CEO wallet)
 wallet_rotation_index = 0
@@ -1706,6 +1719,176 @@ async def addubot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "creation whenever another account is rate limited."
     )
     logger.info(f"🤖 Admin {user.id} added backup userbot '{label}'")
+
+
+async def newubot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /newubot <label> <api_id> <api_hash> <phone> - admin only, DM only.
+    Logs a backup userbot account in through Telegram and stores its session, so
+    no session string ever has to be generated or pasted by hand."""
+    user = update.effective_user
+
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    if update.effective_chat.type != 'private':
+        await reply_privately(
+            update,
+            "❌ Run <code>/newubot</code> in a DM with me - it involves a login code."
+        )
+        return
+
+    if not TELETHON_AVAILABLE:
+        await update.message.reply_text("❌ Telethon is not installed on the bot host.")
+        return
+
+    parts = (update.message.text or '').split()
+    if len(parts) < 5:
+        await update.message.reply_text(
+            "<b>Usage:</b> <code>/newubot &lt;label&gt; &lt;api_id&gt; &lt;api_hash&gt; "
+            "&lt;phone&gt;</code>\n\n"
+            "Example: <code>/newubot backup1 123456 abcdef0123456789 +919058747049</code>\n\n"
+            "api_id/api_hash come from https://my.telegram.org/apps for that account. "
+            "I'll send it a login code and ask you for it here.",
+            parse_mode='HTML'
+        )
+        return
+
+    label, api_id_raw, api_hash, phone = parts[1], parts[2], parts[3], parts[4]
+    try:
+        api_id = int(api_id_raw)
+    except ValueError:
+        await update.message.reply_text("❌ api_id must be a number.")
+        return
+
+    await cancel_userbot_login(user.id)
+
+    try:
+        login_client = TelegramClient(StringSession(), api_id, api_hash)
+        await login_client.connect()
+        sent = await login_client.send_code_request(phone)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Could not start the login: {e}")
+        return
+
+    pending_userbot_login[user.id] = {
+        'client': login_client,
+        'label': label,
+        'api_id': api_id,
+        'api_hash': api_hash,
+        'phone': phone,
+        'code_hash': sent.phone_code_hash,
+        'step': 'code'
+    }
+
+    await update.message.reply_text(
+        f"📲 Login code sent to <code>{phone}</code>.\n\n"
+        "Send it here <b>with spaces between the digits</b> (e.g. <code>1 2 3 4 5</code>) - "
+        "Telegram cancels codes that are posted as plain numbers in a chat.\n\n"
+        "Send <code>/cancelubot</code> to abort.",
+        parse_mode='HTML'
+    )
+
+
+async def cancel_userbot_login(user_id: int) -> bool:
+    """Drop an in-progress /newubot login and disconnect its client."""
+    pending = pending_userbot_login.pop(user_id, None)
+    if not pending:
+        return False
+    try:
+        await pending['client'].disconnect()
+    except Exception as e:
+        logger.warning(f"Could not close the userbot login client: {e}")
+    return True
+
+
+async def cancelubot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /cancelubot - abort an in-progress /newubot login."""
+    user = update.effective_user
+
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    if await cancel_userbot_login(user.id):
+        await update.message.reply_text("🛑 Userbot login cancelled.")
+    else:
+        await update.message.reply_text("No userbot login in progress.")
+
+
+async def process_userbot_login_input(update: Update, pending: dict) -> None:
+    """Take the login code, then the 2FA password if needed, and save the account."""
+    user = update.effective_user
+    text = (update.message.text or '').strip()
+    login_client = pending['client']
+
+    try:
+        if pending['step'] == 'code':
+            code = re.sub(r'\D', '', text)
+            if not code:
+                await update.message.reply_text(
+                    "❌ Send the login code's digits, or <code>/cancelubot</code> to abort.",
+                    parse_mode='HTML'
+                )
+                return
+            try:
+                await login_client.sign_in(
+                    phone=pending['phone'],
+                    code=code,
+                    phone_code_hash=pending['code_hash']
+                )
+            except SessionPasswordNeededError:
+                pending['step'] = 'password'
+                await update.message.reply_text(
+                    "🔐 That account has 2FA. Send its password now "
+                    "(delete your message afterwards)."
+                )
+                return
+        else:
+            await login_client.sign_in(password=text)
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Login failed: {e}\n\nRun <code>/newubot</code> again to retry.",
+            parse_mode='HTML'
+        )
+        await cancel_userbot_login(user.id)
+        return
+
+    session_string = login_client.session.save()
+    try:
+        me = await login_client.get_me()
+        account_name = f"@{me.username}" if me.username else str(me.id)
+    except Exception:
+        account_name = pending['phone']
+
+    saved = database.save_userbot_account(
+        label=pending['label'],
+        api_id=pending['api_id'],
+        api_hash=pending['api_hash'],
+        session_string=session_string,
+        added_by=user.id
+    )
+    await cancel_userbot_login(user.id)
+
+    try:
+        await update.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete the login message: {e}")
+
+    if saved:
+        await update.get_bot().send_message(
+            chat_id=user.id,
+            text=(
+                f"✅ Backup userbot <b>{pending['label']}</b> ({account_name}) logged in "
+                f"and saved.\n\nRestart the userbot process so it picks the account up; "
+                f"it then takes over room creation whenever another account is rate limited."
+            ),
+            parse_mode='HTML'
+        )
+        logger.info(f"🤖 Admin {user.id} logged in backup userbot '{pending['label']}'")
+    else:
+        await update.get_bot().send_message(
+            chat_id=user.id,
+            text="❌ Logged in but could not save the account to the database."
+        )
 
 
 async def ubots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5780,6 +5963,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await process_fake_addy_address(update, _pending_fake_addy)
         return
 
+    # An admin sending the login code / 2FA password requested by /newubot
+    _pending_userbot_login = pending_userbot_login.get(user_id)
+    if _pending_userbot_login:
+        await process_userbot_login_input(update, _pending_userbot_login)
+        return
+
     # Handle -kick command (admin-only, removes a member from the monitored group)
     if text.startswith('-kick'):
         await dash_kick_command(update, context)
@@ -7304,6 +7493,8 @@ def main() -> None:
     application.add_handler(CommandHandler("fakeaddy", fakeaddy_command))
     application.add_handler(CommandHandler("fakeaddylist", fakeaddylist_command))
     application.add_handler(CommandHandler("addubot", addubot_command))
+    application.add_handler(CommandHandler("newubot", newubot_command))
+    application.add_handler(CommandHandler("cancelubot", cancelubot_command))
     application.add_handler(CommandHandler("ubots", ubots_command))
     application.add_handler(CommandHandler("delubot", delubot_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
