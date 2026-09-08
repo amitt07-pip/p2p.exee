@@ -641,26 +641,6 @@ async def hide_room_history(client, chat_id, room_name):
         return False
 
 
-async def clear_room_messages(client, chat_id, limit=300):
-    """Wipe a room's history so the next deal starts on a clean room."""
-    deleted = 0
-    try:
-        msg_ids = [msg.id async for msg in client.iter_messages(chat_id, limit=limit)]
-        for i in range(0, len(msg_ids), 100):
-            batch = msg_ids[i:i + 100]
-            try:
-                await client.delete_messages(chat_id, batch)
-                deleted += len(batch)
-            except Exception as e:
-                logger.warning(f"Could not delete messages in chat {chat_id}: {e}")
-            await asyncio.sleep(0.05)
-        if deleted:
-            logger.info(f"🧹 Cleared {deleted} messages from chat {chat_id}")
-    except Exception as e:
-        logger.warning(f"Could not clear messages in chat {chat_id}: {e}")
-    return deleted
-
-
 async def revoke_room_invites(client, chat_id, room_name):
     """Expire every invite link of a room so the closed deal's link stops working."""
     revoked = 0
@@ -693,15 +673,14 @@ async def revoke_room_invites(client, chat_id, room_name):
 
 async def release_room_to_pool(client, chat_id, room_number, room_name):
     """Return a used room to the premade pool: kick the traders, expire the old
-    invite link, wipe the history and make it available again with a fresh link.
-    The room itself is never deleted."""
+    invite link and make it available again with a fresh one. Nothing is deleted -
+    the room and its whole chat history are kept."""
     entity = await get_room_entity(client, chat_id)
     if entity is None:
         logger.warning(f"Could not resolve {room_name} (chat_id {chat_id}) to release it")
         return False
     await kick_normal_members(client, entity, room_name)
     await revoke_room_invites(client, entity, room_name)
-    await clear_room_messages(client, entity)
     await hide_room_history(client, entity, room_name)
     invite_link = ''
     try:
