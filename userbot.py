@@ -66,12 +66,11 @@ client = None
 ROOM_NUMBER_MIN = 1
 ROOM_NUMBER_MAX = 20
 
-# Longest Telegram flood wait we sit through before giving up on a step.
-MAX_FLOOD_SLEEP = 3600
+# Flood waits up to this many seconds are slept through; anything longer is
+# reported so /startroom can stop and show the rate limit.
+FLOOD_WAIT_TOLERATED = 30
 # Pause between premade room creations, to stay under Telegram's create limits.
 PREWARM_ROOM_DELAY = 4
-# Attempts per room while premaking the pool (a flood wait costs one attempt).
-PREWARM_ROOM_ATTEMPTS = 3
 
 # Accounts added to every new room and promoted with the same rights and
 # "admin" rank as the other room admins. Lookups try username, then user id,
@@ -91,20 +90,21 @@ FIXED_ROOM_ADMINS = [
 
 
 async def invite_user(client, chat_id, entity, label, room_name):
-    """Add a user to a room. Flood limits are waited out; an already-present
-    user counts as success. Returns True when the user is in the room."""
+    """Add a user to a room. Short flood limits are waited out and longer ones
+    are raised; an already-present user counts as success."""
     for attempt in range(1, 4):
         try:
             await client(InviteToChannelRequest(channel=chat_id, users=[entity]))
             logger.info(f"✅ {label} added to {room_name}")
             return True
         except FloodWaitError as e:
-            sleep_for = min(e.seconds, MAX_FLOOD_SLEEP) + 2
+            if e.seconds > FLOOD_WAIT_TOLERATED:
+                raise
             logger.warning(
                 f"⏳ Flood wait {e.seconds}s adding {label} to {room_name} "
-                f"(try {attempt}/3) - sleeping {sleep_for}s"
+                f"(try {attempt}/3)"
             )
-            await asyncio.sleep(sleep_for)
+            await asyncio.sleep(e.seconds + 2)
         except Exception as e:
             if 'already' in str(e).lower():
                 return True
@@ -137,12 +137,13 @@ async def promote_user(client, chat_id, user_id, rank, label, room_name, add_adm
             logger.info(f"✅ {label} promoted as admin ({rank}) in {room_name}")
             return True
         except FloodWaitError as e:
-            sleep_for = min(e.seconds, MAX_FLOOD_SLEEP) + 2
+            if e.seconds > FLOOD_WAIT_TOLERATED:
+                raise
             logger.warning(
                 f"⏳ Flood wait {e.seconds}s promoting {label} in {room_name} "
-                f"(try {attempt}/3) - sleeping {sleep_for}s"
+                f"(try {attempt}/3)"
             )
-            await asyncio.sleep(sleep_for)
+            await asyncio.sleep(e.seconds + 2)
         except Exception as e:
             logger.warning(f"Could not promote {label} in {room_name}: {e}")
             return False
@@ -161,12 +162,13 @@ async def export_invite(client, chat_id, room_name, request_needed=True):
             ))
             return str(result.link)
         except FloodWaitError as e:
-            sleep_for = min(e.seconds, MAX_FLOOD_SLEEP) + 2
+            if e.seconds > FLOOD_WAIT_TOLERATED:
+                raise
             logger.warning(
                 f"⏳ Flood wait {e.seconds}s creating invite link for {room_name} "
-                f"(try {attempt}/3) - sleeping {sleep_for}s"
+                f"(try {attempt}/3)"
             )
-            await asyncio.sleep(sleep_for)
+            await asyncio.sleep(e.seconds + 2)
         except Exception as e:
             logger.warning(f"Could not create invite link for {room_name}: {e}")
             return None
@@ -270,6 +272,17 @@ async def add_extra_room_members(client, chat_id, room_name, sweep_delays=(1.0, 
     for delay in sweep_delays:
         await asyncio.sleep(delay)
         await delete_service_messages(client, chat_id)
+
+
+async def add_extra_room_members_background(client, chat_id, room_name):
+    """Background variant that never raises, so a rate limit while adding the
+    admins cannot take down the task that created a trader's room."""
+    try:
+        await add_extra_room_members(client, chat_id, room_name)
+    except FloodWaitError as e:
+        logger.warning(f"Flood wait {e.seconds}s while adding admins to {room_name}")
+    except Exception as e:
+        logger.warning(f"Could not add admins to {room_name}: {e}")
 
 
 def get_next_room_number():
@@ -464,6 +477,14 @@ def read_prewarm_requests():
     return [r for r in read_json_list(PREWARM_QUEUE_FILE) if r.get('status') == 'pending']
 
 
+def is_prewarm_cancelled(request_id):
+    """True once the Cancel button on the /startroom message has been used."""
+    for req in read_json_list(PREWARM_QUEUE_FILE):
+        if req.get('request_id') == request_id:
+            return bool(req.get('cancel'))
+    return False
+
+
 def update_prewarm_request_status(request_id, status, result=None):
     """Update the status of a /startroom request."""
     requests_data = read_json_list(PREWARM_QUEUE_FILE)
@@ -548,9 +569,8 @@ async def set_room_photo(client, chat_id, room_number, room_name, attempts=3):
                 logger.info(f"✅ Profile picture set for {room_name}")
                 return True
             except FloodWaitError as e:
-                if e.seconds > MAX_FLOOD_SLEEP or attempt == attempts:
-                    logger.warning(f"Flood wait {e.seconds}s setting picture for {room_name}")
-                    return False
+                if e.seconds > FLOOD_WAIT_TOLERATED or attempt == attempts:
+                    raise
                 logger.info(f"⏳ Waiting {e.seconds}s before retrying picture for {room_name}")
                 await asyncio.sleep(e.seconds + 1)
             except Exception as e:
@@ -562,13 +582,16 @@ async def set_room_photo(client, chat_id, room_number, room_name, attempts=3):
             os.remove(image_path)
 
 
-async def repair_pool_rooms(client, bot_token):
+async def repair_pool_rooms(client, bot_token, request_id=None):
     """Finish the setup of premade rooms that lost a step to a flood limit:
     picture, hidden history, bot, fixed admins and invite link. Every step is
     safe to repeat, so this can run after each /startroom."""
     repaired = []
     bot_entity = await resolve_bot_entity(client, bot_token)
     for entry in read_room_pool():
+        if request_id and is_prewarm_cancelled(request_id):
+            logger.info("🛑 Room setup repair cancelled")
+            break
         chat_id = entry.get('chat_id')
         room_number = entry.get('room_number')
         room_name = entry.get('room_name', f'MM ROOM {room_number}')
@@ -934,28 +957,34 @@ ALL COMMANDS ARE CASE-SENSITIVE
             }
             save_room_info(chat_id, deal_rooms[chat_id])
         
-        await set_room_photo(client, chat_id, room_number, room_name)
-        
-        # Add and promote the bot, then the fixed room admins. Every step is
-        # independent and flood tolerant, so one throttled call cannot leave the
-        # room without its bot or admins.
+        # Picture, then the bot and the fixed room admins. Each step is
+        # independent, so one failing call cannot leave the room without its bot
+        # or admins. A real rate limit aborts a premade room (so /startroom can
+        # report it) but never a room a trader is waiting for.
         invite_link = None
         bot_invite_link = None
         bot_ready = False
-        bot_entity = await resolve_bot_entity(client, bot_token)
-        if bot_entity:
-            bot_invite_link = await export_invite(client, chat_id, room_name, request_needed=False)
-            if await invite_user(client, chat_id, bot_entity, 'bot', room_name):
-                bot_ready = await promote_user(client, chat_id, bot_entity.id, 'MM', 'bot', room_name)
-        else:
-            logger.warning(f"Could not resolve the bot to add it to {room_name}")
+        try:
+            await set_room_photo(client, chat_id, room_number, room_name)
 
-        await add_fixed_room_admins(client, chat_id, room_name)
+            bot_entity = await resolve_bot_entity(client, bot_token)
+            if bot_entity:
+                bot_invite_link = await export_invite(client, chat_id, room_name, request_needed=False)
+                if await invite_user(client, chat_id, bot_entity, 'bot', room_name):
+                    bot_ready = await promote_user(client, chat_id, bot_entity.id, 'MM', 'bot', room_name)
+            else:
+                logger.warning(f"Could not resolve the bot to add it to {room_name}")
 
-        if bot_ready:
-            invite_link = await export_invite(client, chat_id, room_name, request_needed=True)
-        else:
-            logger.warning(f"Skipping user invite link creation - bot not ready in {room_name}")
+            await add_fixed_room_admins(client, chat_id, room_name)
+
+            if bot_ready:
+                invite_link = await export_invite(client, chat_id, room_name, request_needed=True)
+            else:
+                logger.warning(f"Skipping user invite link creation - bot not ready in {room_name}")
+        except FloodWaitError as e:
+            if pool_only:
+                raise
+            logger.warning(f"Flood wait {e.seconds}s while setting up {room_name} - continuing")
 
         # Clear the group's creation/join service messages.
         await asyncio.sleep(2.0)
@@ -975,7 +1004,7 @@ ALL COMMANDS ARE CASE-SENSITIVE
             logger.info(f"🏠 {room_name} added to the premade room pool")
             return chat_id, room_name, invite_link
 
-        asyncio.create_task(add_extra_room_members(client, chat_id, room_name))
+        asyncio.create_task(add_extra_room_members_background(client, chat_id, room_name))
 
         # Update deal room info with final details
         deal_rooms[chat_id] = {
@@ -1002,16 +1031,21 @@ ALL COMMANDS ARE CASE-SENSITIVE
 
 
 
-async def prewarm_room_pool(client, bot_token):
+async def prewarm_room_pool(client, bot_token, request_id=None):
     """Create every missing room of the 1..20 pool, fully set up and empty.
     Room numbers already in the pool or in use by an active deal are skipped, so
-    re-running /startroom resumes where a previous run stopped. Flood limits are
-    waited out and the run always continues through room 20; rooms that lost
-    their picture to a flood limit get it back."""
+    re-running /startroom resumes where a previous run stopped. A rate limit or
+    any other failure stops the run and is reported back, as is a cancel from
+    the /startroom message."""
     created = []
-    failed = []
-    flood_wait = 0
+    error = None
+    cancelled = False
     for room_number in range(ROOM_NUMBER_MIN, ROOM_NUMBER_MAX + 1):
+        if request_id and is_prewarm_cancelled(request_id):
+            cancelled = True
+            logger.info("🛑 Room preparation cancelled")
+            break
+
         pooled_numbers = {entry.get('room_number') for entry in read_room_pool()}
         if room_number in pooled_numbers:
             logger.info(f"⏭️ MM ROOM {room_number} already premade - skipping")
@@ -1020,43 +1054,48 @@ async def prewarm_room_pool(client, bot_token):
             logger.info(f"⏭️ MM ROOM {room_number} is in an active deal - skipping")
             continue
 
-        chat_id = None
-        for attempt in range(1, PREWARM_ROOM_ATTEMPTS + 1):
-            try:
-                chat_id, room_name, _ = await create_deal_room(
-                    client,
-                    initiator_username='',
-                    counterparty_username='',
-                    bot_token=bot_token,
-                    pool_only=True,
-                    pool_room_number=room_number
-                )
-                break
-            except FloodWaitError as e:
-                # Wait the limit out and retry the same room, then carry on with
-                # the remaining rooms either way - the pool run never stops early.
-                flood_wait = max(flood_wait, e.seconds)
-                sleep_for = min(e.seconds, MAX_FLOOD_SLEEP) + 2
-                logger.warning(
-                    f"⏳ Flood wait {e.seconds}s on MM ROOM {room_number} "
-                    f"(try {attempt}/{PREWARM_ROOM_ATTEMPTS}) - sleeping {sleep_for}s"
-                )
-                await asyncio.sleep(sleep_for)
+        try:
+            chat_id, _, _ = await create_deal_room(
+                client,
+                initiator_username='',
+                counterparty_username='',
+                bot_token=bot_token,
+                pool_only=True,
+                pool_room_number=room_number
+            )
+        except FloodWaitError as e:
+            error = f"Telegram rate limit on MM ROOM {room_number} - retry in {e.seconds}s"
+            logger.warning(f"⏳ {error}")
+            break
+        except Exception as e:
+            error = f"MM ROOM {room_number}: {e}"
+            logger.warning(f"❌ {error}")
+            break
 
-        if chat_id:
-            created.append(room_number)
-        else:
-            failed.append(room_number)
-            logger.warning(f"❌ Could not premake MM ROOM {room_number}")
+        if not chat_id:
+            error = f"Could not create MM ROOM {room_number}"
+            logger.warning(f"❌ {error}")
+            break
+
+        created.append(room_number)
         await asyncio.sleep(PREWARM_ROOM_DELAY)
 
-    repaired = await repair_pool_rooms(client, bot_token)
+    repaired = []
+    if not cancelled and error is None:
+        try:
+            repaired = await repair_pool_rooms(client, bot_token, request_id)
+        except FloodWaitError as e:
+            error = f"Telegram rate limit while completing room setup - retry in {e.seconds}s"
+            logger.warning(f"⏳ {error}")
+        except Exception as e:
+            error = f"While completing room setup: {e}"
+            logger.warning(f"❌ {error}")
 
     logger.info(f"🏠 Premade {len(created)} room(s): {created}")
     return {
         'created': created,
-        'failed': failed,
-        'flood_wait': flood_wait,
+        'error': error,
+        'cancelled': cancelled,
         'repaired': repaired
     }
 
@@ -1104,7 +1143,7 @@ async def process_deal_requests(client):
             for req in read_prewarm_requests():
                 request_id = req.get('request_id')
                 bot_token = req.get('bot_token', '')
-                result = await prewarm_room_pool(client, bot_token)
+                result = await prewarm_room_pool(client, bot_token, request_id)
                 result['pool_size'] = len(read_room_pool())
                 update_prewarm_request_status(request_id, 'completed', result)
 

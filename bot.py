@@ -831,6 +831,25 @@ def write_prewarm_request(user_id):
         return None
 
 
+def cancel_prewarm_request(request_id):
+    """Flag a /startroom request so the userbot stops creating rooms."""
+    try:
+        if not os.path.exists(PREWARM_QUEUE_FILE):
+            return False
+        with open(PREWARM_QUEUE_FILE, 'r') as f:
+            requests = json.load(f)
+        for req in requests:
+            if req.get('request_id') == request_id:
+                req['cancel'] = True
+        with open(PREWARM_QUEUE_FILE, 'w') as f:
+            json.dump(requests, f, indent=2)
+        logger.info(f"🛑 Cancelled room prewarm request {request_id}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error cancelling prewarm request: {e}")
+        return False
+
+
 def read_room_pool():
     """Premade rooms currently waiting to be assigned."""
     try:
@@ -864,15 +883,19 @@ async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     pool_size = len(read_room_pool())
-    status_msg = await update.message.reply_text(
-        f"🏠 <b>Preparing rooms…</b>\n\nPremade rooms ready: {pool_size}",
-        parse_mode='HTML'
-    )
-
     request_id = write_prewarm_request(user.id)
     if not request_id:
-        await status_msg.edit_text("❌ Could not queue room creation.")
+        await update.message.reply_text("❌ Could not queue room creation.")
         return
+
+    cancel_markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Cancel", callback_data=f"startroom:cancel:{request_id}")
+    ]])
+    status_msg = await update.message.reply_text(
+        f"🏠 <b>Preparing rooms…</b>\n\nPremade rooms ready: {pool_size}",
+        parse_mode='HTML',
+        reply_markup=cancel_markup
+    )
 
     # Creating 20 rooms takes a while - report progress as they appear.
     last_reported = pool_size
@@ -885,28 +908,32 @@ async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             try:
                 await status_msg.edit_text(
                     f"🏠 <b>Preparing rooms…</b>\n\nPremade rooms ready: {current}",
-                    parse_mode='HTML'
+                    parse_mode='HTML',
+                    reply_markup=cancel_markup
                 )
             except Exception:
                 pass
         if result is not None:
             created = result.get('created', [])
-            failed = result.get('failed', [])
-            flood_wait = result.get('flood_wait', 0)
+            error = result.get('error')
             repaired = result.get('repaired', [])
+            available = result.get('pool_size', current)
+            if result.get('cancelled'):
+                header = "🛑 <b>Room preparation cancelled</b>"
+            elif error:
+                header = "❌ <b>Room preparation stopped</b>"
+            else:
+                header = "✅ <b>Rooms ready</b>"
             text = (
-                f"✅ <b>Rooms ready</b>\n\n"
+                f"{header}\n\n"
                 f"Newly created: {len(created)}\n"
-                f"Premade rooms available: {result.get('pool_size', current)}"
+                f"Premade rooms available: {available}"
             )
             if repaired:
                 text += f"\nSetup completed for: {', '.join(str(n) for n in repaired)}"
-            if failed:
-                text += f"\nFailed: {', '.join(str(n) for n in failed)}"
-            if flood_wait:
-                text += "\n\n⚠️ Telegram rate-limited some rooms (waited them out)."
-            if failed:
-                text += "\nRun /startroom again to retry the failed ones."
+            if error:
+                safe_error = str(error).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                text += f"\n\n<b>Error:</b> {safe_error}\nRun /startroom again to continue."
             await status_msg.edit_text(text, parse_mode='HTML')
             return
 
@@ -3303,6 +3330,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Handle /addstats section buttons (admin stats builder)
     if query.data.startswith('addstats:'):
         await handle_addstats_callback(query, context)
+        return
+
+    # Handle the Cancel button on the /startroom progress message
+    if query.data.startswith('startroom:cancel:'):
+        await query.answer("Cancelling…")
+        if user_id == CEO_USER_ID:
+            cancel_prewarm_request(query.data.split(':', 2)[2])
         return
 
     # Handle /list Update button
