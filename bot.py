@@ -775,8 +775,10 @@ def clear_room_state(chat_id):
     for tracker in (disclaimer_sent, role_selection_sent, processed_rooms, rooms_waiting_for_requests):
         tracker.discard(chat_id)
     for state in (room_awaiting_hash, room_transaction_state, user_roles, approvals, release_approvals,
-                  room_joined_users, room_log_messages):
+                  room_joined_users, room_log_messages, room_confirmed_deposits, room_used_tx_hashes,
+                  room_fee_tiers, room_creation_times, role_messages):
         state.pop(chat_id, None)
+    room_messages.pop(str(chat_id), None)
 
 
 def write_release_request(chat_id, room_number, room_name):
@@ -6601,7 +6603,7 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
                 # Update message with NO delay - they're joining NOW
                 send_chat_id = -1000000000000 - positive_chat_id
                 # Schedule the status update as a background task (don't wait for it)
-                context.application.create_task(update_room_join_status(context.bot, send_chat_id, username))
+                context.application.create_task(update_room_join_status(context.bot, send_chat_id, username, user_id))
             else:
                 try:
                     await context.bot.decline_chat_join_request(chat_id, user_id)
@@ -6612,7 +6614,7 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
         logger.error(f"Error handling join request: {e}", exc_info=True)
 
 
-async def update_room_join_status(bot, send_chat_id: int, username: str) -> None:
+async def update_room_join_status(bot, send_chat_id: int, username: str, user_id: int = 0) -> None:
     """Update the waiting message when user joins - NEW VERSION using send_chat_id"""
     try:
         logger.info(f"🔍 Starting update_room_join_status for @{username}, send_chat_id: {send_chat_id}")
@@ -6655,18 +6657,15 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
             logger.info(f"Room found: {room_name}, initiator: @{initiator_username}, counterparty: @{counterparty_username}")
         logger.info(f"Stored rooms in memory: {list(room_messages.keys())}")
         
-        # Get stored message IDs for this room
-        if str(original_chat_id) not in room_messages:
-            logger.warning(f"❌ No message info stored for original chat {original_chat_id}. Available in memory: {list(room_messages.keys())}")
-            return
-        
-        msg_info = room_messages[str(original_chat_id)]
+        # Stored message IDs for this room (may be empty after a restart - the
+        # disclaimer/role selection below must still run)
+        msg_info = room_messages.setdefault(str(original_chat_id), {})
         
         logger.info(f"Updating join status for @{username} in {room_name}")
         logger.info(f"Available message IDs: {msg_info}")
         
         # Delete waiting message and send new joined message for initiator (case-insensitive)
-        if username.lower() == initiator_username.lower():
+        if username and initiator_username and username.lower() == initiator_username.lower():
             logger.info(f"Checking initiator message for @{username} == @{initiator_username}")
             if 'initiator_msg_id' in msg_info:
                 try:
@@ -6696,17 +6695,13 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
         # Delete waiting message and send new joined message for counterparty (case-insensitive or by user_id)
         # Check if this user is the counterparty - by username or by user_id
         is_counterparty = False
-        if counterparty_user_id:
-            # When counterparty is identified by user_id, we need to get the joining user's ID
-            # For now, check if username matches (user might have a username even if identified by ID)
-            if counterparty_username and username and username.lower() == counterparty_username.lower():
-                is_counterparty = True
-            # Also mark as counterparty if no username match but this is the expected user
-            # (The handle_chat_join_request already verified by user_id)
-            elif not counterparty_username or counterparty_username == '':
-                is_counterparty = True  # Trust that handle_chat_join_request verified correctly
-        elif counterparty_username and username:
+        if counterparty_user_id and user_id:
+            is_counterparty = (user_id == counterparty_user_id)
+        if not is_counterparty and counterparty_username and username:
             is_counterparty = (username.lower() == counterparty_username.lower())
+        if not is_counterparty and counterparty_user_id and not counterparty_username:
+            # Counterparty is only known by id and the join request was already verified
+            is_counterparty = True
         
         if is_counterparty:
             if counterparty_user_id:
@@ -6747,19 +6742,18 @@ async def update_room_join_status(bot, send_chat_id: int, username: str) -> None
             else:
                 logger.info(f"Username @{username} != counterparty @{counterparty_username}")
         
-        # Track joined users
-        if original_chat_id not in room_joined_users:
-            room_joined_users[original_chat_id] = set()
-        
-        room_joined_users[original_chat_id].add(username.lower())
-        joined_count = len(room_joined_users[original_chat_id])
-        logger.info(f"📊 Room {room_name}: {joined_count}/2 users joined - {room_joined_users[original_chat_id]}")
+        # Track joined users by both username and id, then decide per participant
+        mark_room_join(original_chat_id, username, user_id)
+        initiator_joined = has_joined_room(original_chat_id, initiator_username, None)
+        counterparty_joined = has_joined_room(original_chat_id, counterparty_username, counterparty_user_id)
+        logger.info(
+            f"📊 Room {room_name}: initiator joined={initiator_joined}, "
+            f"counterparty joined={counterparty_joined} - {room_joined_users.get(original_chat_id)}"
+        )
         
         # Check if both users have joined
-        if (joined_count == 2 and 
-            original_chat_id not in disclaimer_sent and
-            initiator_username.lower() in room_joined_users[original_chat_id] and
-            counterparty_username.lower() in room_joined_users[original_chat_id]):
+        if (initiator_joined and counterparty_joined and
+            original_chat_id not in disclaimer_sent):
             
             logger.info(f"🎯 Both users joined in {room_name}! Sending disclaimer message...")
             

@@ -12,7 +12,11 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.tl.functions.channels import CreateChannelRequest, EditPhotoRequest, InviteToChannelRequest, EditAdminRequest, DeleteChannelRequest
 from telethon.tl.functions.channels import EditBannedRequest, TogglePreHistoryHiddenRequest
-from telethon.tl.functions.messages import ExportChatInviteRequest
+from telethon.tl.functions.messages import (
+    ExportChatInviteRequest,
+    EditExportedChatInviteRequest,
+    GetExportedChatInvitesRequest
+)
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import (
     ChatAdminRights,
@@ -657,27 +661,54 @@ async def clear_room_messages(client, chat_id, limit=300):
     return deleted
 
 
+async def revoke_room_invites(client, chat_id, room_name):
+    """Expire every invite link of a room so the closed deal's link stops working."""
+    revoked = 0
+    try:
+        result = await client(GetExportedChatInvitesRequest(
+            peer=chat_id,
+            admin_id='me',
+            revoked=False,
+            limit=100
+        ))
+        for invite in result.invites:
+            if invite.revoked:
+                continue
+            try:
+                await client(EditExportedChatInviteRequest(
+                    peer=chat_id,
+                    link=invite.link,
+                    revoked=True
+                ))
+                revoked += 1
+            except Exception as e:
+                logger.warning(f"Could not revoke an invite link for {room_name}: {e}")
+            await asyncio.sleep(0.05)
+        if revoked:
+            logger.info(f"🔗 Expired {revoked} invite link(s) for {room_name}")
+    except Exception as e:
+        logger.warning(f"Could not list invite links for {room_name}: {e}")
+    return revoked
+
+
 async def release_room_to_pool(client, chat_id, room_number, room_name):
-    """Return a used room to the premade pool: kick the traders, wipe the history
-    and make it available again. The room itself is never deleted."""
+    """Return a used room to the premade pool: kick the traders, expire the old
+    invite link, wipe the history and make it available again with a fresh link.
+    The room itself is never deleted."""
     entity = await get_room_entity(client, chat_id)
     if entity is None:
         logger.warning(f"Could not resolve {room_name} (chat_id {chat_id}) to release it")
         return False
     await kick_normal_members(client, entity, room_name)
+    await revoke_room_invites(client, entity, room_name)
     await clear_room_messages(client, entity)
     await hide_room_history(client, entity, room_name)
     invite_link = ''
     try:
-        invite_result = await client(ExportChatInviteRequest(
-            peer=entity,
-            expire_date=None,
-            usage_limit=None,
-            request_needed=True
-        ))
-        invite_link = str(invite_result.link)
+        invite_link = await export_invite(client, entity, room_name, request_needed=True) or ''
     except Exception as e:
         logger.warning(f"Could not refresh invite link for {room_name}: {e}")
+    delete_room_info(chat_id)
     add_room_to_pool({
         'chat_id': chat_id,
         'room_number': room_number,
@@ -792,6 +823,22 @@ async def compute_fee_tier(client, initiator_username, counterparty_username, co
         fee_tier = "0.75%"
     logger.info(f"💰 Fee tier calculated: {fee_tier} (initiator_has_room={initiator_has_room}, counterparty_has_room={counterparty_has_room})")
     return fee_tier
+
+
+def delete_room_info(chat_id):
+    """Drop a finished deal's entry from deal_rooms.json so the room starts clean."""
+    try:
+        room_info_file = "deal_rooms.json"
+        if not os.path.exists(room_info_file):
+            return
+        with open(room_info_file, 'r') as f:
+            room_info = json.load(f)
+        if room_info.pop(str(chat_id), None) is None:
+            return
+        with open(room_info_file, 'w') as f:
+            json.dump(room_info, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not clear room info for {chat_id}: {e}")
 
 
 def save_room_info(chat_id, info):
