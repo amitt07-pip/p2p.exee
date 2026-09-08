@@ -899,7 +899,15 @@ async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reply_markup=cancel_markup
     )
 
-    # Creating 20 rooms takes a while - report progress as they appear.
+    # Creating 20 rooms takes a while - report progress in the background so the
+    # bot keeps handling everything else (join requests included) meanwhile.
+    context.application.create_task(
+        report_prewarm_progress(status_msg, request_id, pool_size, cancel_markup)
+    )
+
+
+async def report_prewarm_progress(status_msg, request_id, pool_size, cancel_markup):
+    """Keep the /startroom status message up to date until the run finishes."""
     last_reported = pool_size
     for _ in range(5400):
         await asyncio.sleep(2)
@@ -944,8 +952,18 @@ async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
-async def check_and_send_deal_results(application, initiator_username):
-    """Check if deal room was created and send results to initiating group"""
+async def wait_for_deal_result(application, initiator_username):
+    """Poll the queue until the userbot reports the room, then stop - polling on
+    past the result would keep an update slot busy for no reason."""
+    for _ in range(300):  # up to ~60s
+        await asyncio.sleep(0.2)
+        if await check_and_send_deal_results(application, initiator_username):
+            return
+
+
+async def check_and_send_deal_results(application, initiator_username) -> bool:
+    """Check if deal room was created and send results to initiating group.
+    Returns True once a result has been sent."""
     try:
         if os.path.exists(DEAL_QUEUE_FILE):
             with open(DEAL_QUEUE_FILE, 'r') as f:
@@ -1054,8 +1072,10 @@ async def check_and_send_deal_results(application, initiator_username):
             if updated:
                 with open(DEAL_QUEUE_FILE, 'w') as f:
                     json.dump(requests, f, indent=2)
+            return updated
     except Exception as e:
         logger.error(f"❌ Error: {e}")
+    return False
 
 
 async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1234,10 +1254,11 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         else:
             logger.info(f"📋 /room command: {user.username or user.first_name} -> User {counterparty_user_id}")
         
-        # Start polling for results (silently, no initial message)
-        for _ in range(300):  # Check for at least 60 seconds with faster polling
-            await asyncio.sleep(0.2)  # Minimal delay for faster detection
-            await check_and_send_deal_results(context.application, user.username or user.first_name)
+        # Wait for the userbot's result in the background - a blocking wait here
+        # would stall every other update (join requests included) for a minute.
+        context.application.create_task(
+            wait_for_deal_result(context.application, user.username or user.first_name)
+        )
     else:
         await update.message.reply_text(
             "❌ Error creating deal room. Please try again."
