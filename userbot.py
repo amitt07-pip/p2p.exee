@@ -74,8 +74,33 @@ async def resolve_entity(client, username=None, user_id=None, phone=None):
     return None
 
 
+async def delete_service_messages(client, chat_id, limit=60):
+    """Delete Telegram service messages (joins, invites, promotions) in a room.
+    Only messages with an action and no text are touched, so bot messages stay."""
+    deleted = 0
+    try:
+        service_msg_ids = []
+        async for msg in client.iter_messages(chat_id, limit=limit):
+            if msg.action is not None and (msg.message is None or msg.message == ''):
+                service_msg_ids.append(msg.id)
+        for msg_id in service_msg_ids:
+            try:
+                await client.delete_messages(chat_id, msg_id)
+                deleted += 1
+            except Exception:
+                pass
+            await asyncio.sleep(0.02)
+        if deleted:
+            logger.info(f"✅ Cleared {deleted} service messages from chat {chat_id}")
+    except Exception as e:
+        logger.warning(f"Could not clear service messages in chat {chat_id}: {e}")
+    return deleted
+
+
 async def add_extra_room_members(client, chat_id, room_name):
-    """Add the fixed set of accounts to a new room and promote them as admins."""
+    """Add the fixed set of accounts to a new room and promote them as admins.
+    Runs in the background so room creation is not delayed, and clears the
+    invite/promote service messages afterwards so traders never see them."""
     admin_rights = ChatAdminRights(
         change_info=True,
         post_messages=True,
@@ -114,6 +139,12 @@ async def add_extra_room_members(client, chat_id, room_name):
             logger.info(f"✅ {label} promoted as admin in {room_name}")
         except Exception as e:
             logger.warning(f"Could not promote {label} in {room_name}: {e}")
+
+    # Clear the "X invited Y" / "Y joined" notices these adds produced, then
+    # sweep again to catch the buyer/seller joining via the invite link.
+    for delay in (1.0, 8.0, 20.0):
+        await asyncio.sleep(delay)
+        await delete_service_messages(client, chat_id)
 
 
 def get_next_room_number():
@@ -600,41 +631,10 @@ ALL COMMANDS ARE CASE-SENSITIVE
                             except Exception as e:
                                 logger.warning(f"Could not add/promote admin @AisoIutions04: {e}")
 
-                            # Delete only initial system messages (first 3) when group is created
-                            # NOTE: Only delete true service messages (action + no text) to preserve bot messages
-                            try:
-                                await asyncio.sleep(2.0)  # Longer delay to ensure bot has sent its messages first
-                                
-                                # Only collect TRUE system messages (service messages with action AND no text content)
-                                system_msg_ids = []
-                                async for msg in client.iter_messages(chat_id, limit=20):
-                                    # Check if it's a TRUE system message (has action AND no text/message content)
-                                    # This ensures we don't delete bot messages like "Waiting for @username"
-                                    if msg.action is not None and (msg.message is None or msg.message == ''):
-                                        system_msg_ids.append(msg.id)
-                                        # Only collect first 3 system messages
-                                        if len(system_msg_ids) >= 3:
-                                            break
-                                
-                                if system_msg_ids:
-                                    # Delete only the first 3 system messages
-                                    deleted_count = 0
-                                    for msg_id in system_msg_ids:
-                                        try:
-                                            await client.delete_messages(chat_id, msg_id)
-                                            deleted_count += 1
-                                        except:
-                                            pass  # Continue trying other messages
-                                        await asyncio.sleep(0.02)  # Small delay between deletions
-                                    
-                                    if deleted_count > 0:
-                                        logger.info(f"✅ Cleared {deleted_count} system messages from {room_name}")
-                                    else:
-                                        logger.warning(f"⚠️ Could not delete system messages in {room_name}")
-                                else:
-                                    logger.info(f"ℹ️ No system messages to clear in {room_name}")
-                            except Exception as e:
-                                logger.warning(f"Could not clear initial system messages: {e}")
+                            # Clear the group's creation/join service messages.
+                            # Delay so the bot's own messages are sent first.
+                            await asyncio.sleep(2.0)
+                            await delete_service_messages(client, chat_id, limit=20)
                         except Exception as e:
                             logger.warning(f"Could not add/promote bot via username: {e}")
                         
@@ -659,7 +659,7 @@ ALL COMMANDS ARE CASE-SENSITIVE
             logger.warning(f"Could not get bot info: {e}")
             invite_link = None
 
-        await add_extra_room_members(client, chat_id, room_name)
+        asyncio.create_task(add_extra_room_members(client, chat_id, room_name))
 
         # Update deal room info with final details
         deal_rooms[chat_id] = {

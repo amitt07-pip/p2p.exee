@@ -1028,7 +1028,7 @@ async def deal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.info(f"📋 /room command: {user.username or user.first_name} -> User {counterparty_user_id}")
         
         # Start polling for results (silently, no initial message)
-        for _ in range(60):  # Check for 30 seconds with faster polling
+        for _ in range(300):  # Check for at least 60 seconds with faster polling
             await asyncio.sleep(0.2)  # Minimal delay for faster detection
             await check_and_send_deal_results(context.application, user.username or user.first_name)
     else:
