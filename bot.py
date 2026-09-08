@@ -952,6 +952,16 @@ async def report_prewarm_progress(status_msg, request_id, pool_size, cancel_mark
     )
 
 
+async def kick_member(bot, chat_id: int, user_id: int) -> None:
+    """Remove a member without leaving them banned, so they can be added back
+    or rejoin another room later."""
+    await bot.ban_chat_member(chat_id, user_id)
+    try:
+        await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+    except Exception as e:
+        logger.warning(f"Could not lift the ban on {user_id} in {chat_id}: {e}")
+
+
 async def wait_for_deal_result(application, initiator_username):
     """Poll the queue until the userbot reports the room, then stop - polling on
     past the result would keep an update slot busy for no reason."""
@@ -1764,7 +1774,7 @@ async def kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         if target_user_id:
             # Kick using user ID (most reliable method)
-            await context.bot.ban_chat_member(chat_id, target_user_id)
+            await kick_member(context.bot, chat_id, target_user_id)
             logger.info(f"🚫 User kicked: @{target_username} (ID: {target_user_id})")
             await update.message.reply_text(f"✅ User @{target_username} has been kicked from the group.")
         else:
@@ -1824,12 +1834,7 @@ async def dash_kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                else f"<code>{target_user_id}</code>")
 
     try:
-        await context.bot.ban_chat_member(P2P_ROOM_GROUP_ID, target_user_id)
-        # Unban right away so this is a kick, not a permanent ban
-        try:
-            await context.bot.unban_chat_member(P2P_ROOM_GROUP_ID, target_user_id, only_if_banned=True)
-        except Exception as e:
-            logger.warning(f"Could not unban {target_user_id} after kick: {e}")
+        await kick_member(context.bot, P2P_ROOM_GROUP_ID, target_user_id)
         logger.info(f"🚫 Admin {user.id} kicked {target_user_id} (@{target_username}) from the P2P ROOM group")
         await update.message.reply_text(
             f"✅ {display} has been kicked from the P2P ROOM group.",
@@ -3581,7 +3586,7 @@ Remaining: {network_fee:.4f} {coin}
                     try:
                         buyer_id = get_user_id(buyer_username)
                         if buyer_id:
-                            await context.bot.ban_chat_member(send_chat_id, buyer_id)
+                            await kick_member(context.bot, send_chat_id, buyer_id)
                             logger.info(f"✅ Kicked buyer {buyer_username} from room {chat_id}")
                         else:
                             logger.warning(f"⚠️ No user ID found for buyer {buyer_username}")
@@ -3593,7 +3598,7 @@ Remaining: {network_fee:.4f} {coin}
                     try:
                         seller_id = get_user_id(seller_username)
                         if seller_id:
-                            await context.bot.ban_chat_member(send_chat_id, seller_id)
+                            await kick_member(context.bot, send_chat_id, seller_id)
                             logger.info(f"✅ Kicked seller {seller_username} from room {chat_id}")
                         else:
                             logger.warning(f"⚠️ No user ID found for seller {seller_username}")

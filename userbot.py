@@ -11,7 +11,7 @@ import asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.tl.functions.channels import CreateChannelRequest, EditPhotoRequest, InviteToChannelRequest, EditAdminRequest, DeleteChannelRequest
-from telethon.tl.functions.channels import EditBannedRequest, TogglePreHistoryHiddenRequest
+from telethon.tl.functions.channels import TogglePreHistoryHiddenRequest
 from telethon.tl.functions.messages import (
     ExportChatInviteRequest,
     EditExportedChatInviteRequest,
@@ -20,7 +20,6 @@ from telethon.tl.functions.messages import (
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import (
     ChatAdminRights,
-    ChatBannedRights,
     InputChatPhoto,
     InputPhoto,
     ChannelParticipantAdmin,
@@ -532,8 +531,6 @@ async def kick_normal_members(client, chat_id, room_name):
     """Kick every ordinary member of a room, keeping admins, the creator and bots.
     Works regardless of whether deal roles were ever selected."""
     kicked = 0
-    kick_rights = ChatBannedRights(until_date=None, view_messages=True)
-    unban_rights = ChatBannedRights(until_date=None, view_messages=False)
     try:
         async for participant in client.iter_participants(chat_id):
             status = participant.participant
@@ -542,8 +539,9 @@ async def kick_normal_members(client, chat_id, room_name):
             if participant.bot:
                 continue
             try:
-                await client(EditBannedRequest(chat_id, participant.id, kick_rights))
-                await client(EditBannedRequest(chat_id, participant.id, unban_rights))
+                # Removes the member and lifts the ban again, so they are never
+                # left banned and can be added back to any room later.
+                await client.kick_participant(chat_id, participant.id)
                 kicked += 1
             except Exception as e:
                 logger.warning(f"Could not kick {participant.id} from {room_name}: {e}")
@@ -716,7 +714,8 @@ async def release_room_to_pool(client, chat_id, room_number, room_name):
         'room_number': room_number,
         'room_name': room_name,
         'invite_link': invite_link,
-        'bot_invite_link': ''
+        'bot_invite_link': '',
+        'bot_ready': True
     })
     logger.info(f"♻️ {room_name} returned to the premade room pool")
     return True
@@ -893,20 +892,17 @@ async def assign_pooled_room(client, entry, initiator_username, counterparty_use
             entry['bot_ready'] = True
             invite_link = await export_invite(client, entity, room_name, request_needed=True) or invite_link
 
-    if not invite_link:
-        # The room was premade without a usable link (e.g. throttled) - make one now
-        entity = await get_room_entity(client, chat_id)
-        if entity is not None:
-            try:
-                invite_result = await client(ExportChatInviteRequest(
-                    peer=entity,
-                    expire_date=None,
-                    usage_limit=None,
-                    request_needed=True
-                ))
-                invite_link = str(invite_result.link)
-            except Exception as e:
-                logger.warning(f"Could not create invite link for {room_name}: {e}")
+    # Every deal gets its own link: expire whatever the room had and export a new
+    # one, so a link from a previous deal can never be reused.
+    entity = await get_room_entity(client, chat_id)
+    if entity is not None:
+        try:
+            await revoke_room_invites(client, entity, room_name)
+            invite_link = await export_invite(
+                client, entity, room_name, request_needed=True
+            ) or invite_link
+        except Exception as e:
+            logger.warning(f"Could not create a fresh invite link for {room_name}: {e}")
 
     deal_rooms[chat_id] = {
         'room_number': room_number,
