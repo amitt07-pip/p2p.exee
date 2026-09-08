@@ -83,6 +83,134 @@ EXTRA_ROOM_MEMBERS = [
     {'username': '@EpicGuardianBot', 'user_id': None, 'phone': None},
 ]
 
+# Permanent room admin accounts added to every room alongside the bot.
+FIXED_ROOM_ADMINS = [
+    {'username': None, 'user_id': None, 'phone': '+918240720413', 'label': 'admin account'},
+    {'username': '@AisoIutions04', 'user_id': 7629970378, 'phone': '+16592202558', 'label': '@AisoIutions04'},
+]
+
+
+async def invite_user(client, chat_id, entity, label, room_name):
+    """Add a user to a room. Flood limits are waited out; an already-present
+    user counts as success. Returns True when the user is in the room."""
+    for attempt in range(1, 4):
+        try:
+            await client(InviteToChannelRequest(channel=chat_id, users=[entity]))
+            logger.info(f"✅ {label} added to {room_name}")
+            return True
+        except FloodWaitError as e:
+            sleep_for = min(e.seconds, MAX_FLOOD_SLEEP) + 2
+            logger.warning(
+                f"⏳ Flood wait {e.seconds}s adding {label} to {room_name} "
+                f"(try {attempt}/3) - sleeping {sleep_for}s"
+            )
+            await asyncio.sleep(sleep_for)
+        except Exception as e:
+            if 'already' in str(e).lower():
+                return True
+            logger.warning(f"Could not add {label} to {room_name}: {e}")
+            return False
+    return False
+
+
+async def promote_user(client, chat_id, user_id, rank, label, room_name, add_admins=False):
+    """Promote a user to admin in a room, waiting out flood limits."""
+    rights = ChatAdminRights(
+        change_info=True,
+        post_messages=True,
+        edit_messages=True,
+        delete_messages=True,
+        ban_users=True,
+        invite_users=True,
+        pin_messages=True,
+        add_admins=add_admins,
+        manage_call=False
+    )
+    for attempt in range(1, 4):
+        try:
+            await client(EditAdminRequest(
+                channel=chat_id,
+                user_id=user_id,
+                admin_rights=rights,
+                rank=rank
+            ))
+            logger.info(f"✅ {label} promoted as admin ({rank}) in {room_name}")
+            return True
+        except FloodWaitError as e:
+            sleep_for = min(e.seconds, MAX_FLOOD_SLEEP) + 2
+            logger.warning(
+                f"⏳ Flood wait {e.seconds}s promoting {label} in {room_name} "
+                f"(try {attempt}/3) - sleeping {sleep_for}s"
+            )
+            await asyncio.sleep(sleep_for)
+        except Exception as e:
+            logger.warning(f"Could not promote {label} in {room_name}: {e}")
+            return False
+    return False
+
+
+async def export_invite(client, chat_id, room_name, request_needed=True):
+    """Create an invite link for a room, waiting out flood limits."""
+    for attempt in range(1, 4):
+        try:
+            result = await client(ExportChatInviteRequest(
+                peer=chat_id,
+                expire_date=None,
+                usage_limit=None,
+                request_needed=request_needed
+            ))
+            return str(result.link)
+        except FloodWaitError as e:
+            sleep_for = min(e.seconds, MAX_FLOOD_SLEEP) + 2
+            logger.warning(
+                f"⏳ Flood wait {e.seconds}s creating invite link for {room_name} "
+                f"(try {attempt}/3) - sleeping {sleep_for}s"
+            )
+            await asyncio.sleep(sleep_for)
+        except Exception as e:
+            logger.warning(f"Could not create invite link for {room_name}: {e}")
+            return None
+    return None
+
+
+async def resolve_bot_entity(client, bot_token):
+    """Look up the bot's Telegram entity from its token."""
+    if not bot_token:
+        logger.warning("No bot token available - cannot add the bot to the room")
+        return None
+    try:
+        response = requests.get(f"https://api.telegram.org/bot{bot_token}/getMe", timeout=15)
+        if response.status_code != 200:
+            logger.warning(f"getMe failed with status {response.status_code}")
+            return None
+        bot_username = response.json().get('result', {}).get('username')
+    except Exception as e:
+        logger.warning(f"Could not get bot info: {e}")
+        return None
+    if not bot_username:
+        return None
+    try:
+        return await client.get_entity(f"@{bot_username}")
+    except Exception as e:
+        logger.warning(f"Could not resolve @{bot_username}: {e}")
+        return None
+
+
+async def add_fixed_room_admins(client, chat_id, room_name):
+    """Add and promote the permanent room admin accounts."""
+    for admin in FIXED_ROOM_ADMINS:
+        entity = await resolve_entity(
+            client,
+            username=admin['username'],
+            user_id=admin['user_id'],
+            phone=admin['phone']
+        )
+        if not entity:
+            logger.warning(f"Could not find {admin['label']} to add to {room_name}")
+            continue
+        if await invite_user(client, chat_id, entity, admin['label'], room_name):
+            await promote_user(client, chat_id, entity.id, "admin", admin['label'], room_name)
+
 
 async def resolve_entity(client, username=None, user_id=None, phone=None):
     """Resolve a Telegram entity by username, then user id, then phone number."""
@@ -123,19 +251,8 @@ async def add_extra_room_members(client, chat_id, room_name, sweep_delays=(1.0, 
     """Add the fixed set of accounts to a new room and promote them as admins.
     Runs in the background so room creation is not delayed, and clears the
     invite/promote service messages afterwards so traders never see them."""
-    admin_rights = ChatAdminRights(
-        change_info=True,
-        post_messages=True,
-        edit_messages=True,
-        delete_messages=True,
-        ban_users=True,
-        invite_users=True,
-        pin_messages=True,
-        add_admins=False,
-        manage_call=False
-    )
     for member in EXTRA_ROOM_MEMBERS:
-        label = member['username'] or member['user_id']
+        label = str(member['username'] or member['user_id'])
         entity = await resolve_entity(
             client,
             username=member['username'],
@@ -145,22 +262,8 @@ async def add_extra_room_members(client, chat_id, room_name, sweep_delays=(1.0, 
         if not entity:
             logger.warning(f"Could not find {label} to add to {room_name}")
             continue
-        try:
-            await client(InviteToChannelRequest(channel=chat_id, users=[entity]))
-            logger.info(f"✅ {label} added to {room_name}")
-        except Exception as e:
-            logger.warning(f"Could not add {label} to {room_name}: {e}")
-            continue
-        try:
-            await client(EditAdminRequest(
-                channel=chat_id,
-                user_id=entity.id,
-                admin_rights=admin_rights,
-                rank="admin"
-            ))
-            logger.info(f"✅ {label} promoted as admin in {room_name}")
-        except Exception as e:
-            logger.warning(f"Could not promote {label} in {room_name}: {e}")
+        if await invite_user(client, chat_id, entity, label, room_name):
+            await promote_user(client, chat_id, entity.id, "admin", label, room_name)
 
     # Clear the "X invited Y" / "Y joined" notices these adds produced, then
     # sweep again to catch the buyer/seller joining via the invite link.
@@ -459,10 +562,12 @@ async def set_room_photo(client, chat_id, room_number, room_name, attempts=3):
             os.remove(image_path)
 
 
-async def backfill_pool_photos(client):
-    """Give any premade room that ended up without a picture (e.g. it was
-    throttled while the pool was being built) its room image."""
-    fixed = []
+async def repair_pool_rooms(client, bot_token):
+    """Finish the setup of premade rooms that lost a step to a flood limit:
+    picture, hidden history, bot, fixed admins and invite link. Every step is
+    safe to repeat, so this can run after each /startroom."""
+    repaired = []
+    bot_entity = await resolve_bot_entity(client, bot_token)
     for entry in read_room_pool():
         chat_id = entry.get('chat_id')
         room_number = entry.get('room_number')
@@ -472,14 +577,31 @@ async def backfill_pool_photos(client):
         entity = await get_room_entity(client, chat_id)
         if entity is None:
             continue
-        if not isinstance(entity.photo, ChatPhotoEmpty):
-            continue
-        if await set_room_photo(client, entity, room_number, room_name):
-            fixed.append(room_number)
+
+        changed = False
+        if isinstance(entity.photo, ChatPhotoEmpty):
+            if await set_room_photo(client, entity, room_number, room_name):
+                changed = True
+
+        if bot_entity and await invite_user(client, entity, bot_entity, 'bot', room_name):
+            await promote_user(client, entity, bot_entity.id, 'MM', 'bot', room_name)
+
+        await add_fixed_room_admins(client, entity, room_name)
+        await add_extra_room_members(client, entity, room_name, sweep_delays=(1.0,))
+
+        if not entry.get('invite_link'):
+            invite_link = await export_invite(client, entity, room_name, request_needed=True)
+            if invite_link:
+                entry['invite_link'] = invite_link
+                add_room_to_pool(entry)
+                changed = True
+
+        if changed:
+            repaired.append(room_number)
         await asyncio.sleep(1)
-    if fixed:
-        logger.info(f"🖼️ Back-filled pictures for room(s): {fixed}")
-    return fixed
+    if repaired:
+        logger.info(f"🛠️ Completed setup for room(s): {repaired}")
+    return repaired
 
 
 async def hide_room_history(client, chat_id, room_name):
@@ -814,164 +936,30 @@ ALL COMMANDS ARE CASE-SENSITIVE
         
         await set_room_photo(client, chat_id, room_number, room_name)
         
-        # Get bot username and add it to the room
+        # Add and promote the bot, then the fixed room admins. Every step is
+        # independent and flood tolerant, so one throttled call cannot leave the
+        # room without its bot or admins.
+        invite_link = None
         bot_invite_link = None
-        try:
-            if bot_token:
-                # Get bot username using Telegram API
-                bot_api_url = f"https://api.telegram.org/bot{bot_token}/getMe"
-                response = requests.get(bot_api_url)
-                if response.status_code == 200:
-                    bot_data = response.json().get('result', {})
-                    bot_username = bot_data.get('username')
-                    
-                    if bot_username:
-                        # Create invite link for bot to join
-                        bot_invite_result = await client(ExportChatInviteRequest(
-                            peer=chat_id,
-                            expire_date=None,
-                            usage_limit=None,
-                            request_needed=False
-                        ))
-                        bot_invite_link = str(bot_invite_result.link)
-                        logger.info(f"✅ Bot invite link created for {room_name}")
-                        
-                        # Try to add bot via username
-                        bot_added = False
-                        bot_promoted = False
-                        try:
-                            bot_entity = await client.get_entity(f"@{bot_username}")
-                            await client(InviteToChannelRequest(
-                                channel=chat_id,
-                                users=[bot_entity]
-                            ))
-                            logger.info(f"✅ Bot added to {room_name}")
-                            bot_added = True
-                            
-                            # Promote bot as admin
-                            admin_rights = ChatAdminRights(
-                                change_info=True,
-                                post_messages=True,
-                                edit_messages=True,
-                                delete_messages=True,
-                                ban_users=True,
-                                invite_users=True,
-                                pin_messages=True,
-                                add_admins=False,
-                                manage_call=False
-                            )
-                            await client(EditAdminRequest(
-                                channel=chat_id,
-                                user_id=bot_entity.id,
-                                admin_rights=admin_rights,
-                                rank="MM"
-                            ))
-                            logger.info(f"✅ Bot promoted as admin with MM rank in {room_name}")
-                            bot_promoted = True
-                            
-                            # Also add +918240720413 as admin with same rights
-                            try:
-                                admin_entity = await client.get_entity("+918240720413")
-                                await client(InviteToChannelRequest(
-                                    channel=chat_id,
-                                    users=[admin_entity]
-                                ))
-                                logger.info(f"✅ Admin account added to {room_name}")
-                                
-                                # Promote admin account with same rights as bot
-                                admin_account_rights = ChatAdminRights(
-                                    change_info=True,
-                                    post_messages=True,
-                                    edit_messages=True,
-                                    delete_messages=True,
-                                    ban_users=True,
-                                    invite_users=True,
-                                    pin_messages=True,
-                                    add_admins=False,
-                                    manage_call=False
-                                )
-                                await client(EditAdminRequest(
-                                    channel=chat_id,
-                                    user_id=admin_entity.id,
-                                    admin_rights=admin_account_rights,
-                                    rank="admin"
-                                ))
-                                logger.info(f"✅ Admin account promoted with admin rank in {room_name}")
-                            except Exception as e:
-                                logger.warning(f"Could not add/promote admin account: {e}")
-                            
-                            # Add @AisoIutions04 as admin (try username → user ID → phone)
-                            try:
-                                aiso_entity = None
-                                try:
-                                    aiso_entity = await client.get_entity("@AisoIutions04")
-                                    logger.info(f"✅ Found admin by username @AisoIutions04")
-                                except Exception:
-                                    try:
-                                        aiso_entity = await client.get_entity(7629970378)
-                                        logger.info(f"✅ Found admin by user ID 7629970378")
-                                    except Exception:
-                                        try:
-                                            aiso_entity = await client.get_entity("+16592202558")
-                                            logger.info(f"✅ Found admin by phone +16592202558")
-                                        except Exception as e3:
-                                            logger.warning(f"Could not find admin by any method: {e3}")
-                                
-                                if aiso_entity:
-                                    await client(InviteToChannelRequest(
-                                        channel=chat_id,
-                                        users=[aiso_entity]
-                                    ))
-                                    logger.info(f"✅ Admin @AisoIutions04 added to {room_name}")
-                                    
-                                    aiso_admin_rights = ChatAdminRights(
-                                        change_info=True,
-                                        post_messages=True,
-                                        edit_messages=True,
-                                        delete_messages=True,
-                                        ban_users=True,
-                                        invite_users=True,
-                                        pin_messages=True,
-                                        add_admins=False,
-                                        manage_call=False
-                                    )
-                                    await client(EditAdminRequest(
-                                        channel=chat_id,
-                                        user_id=aiso_entity.id,
-                                        admin_rights=aiso_admin_rights,
-                                        rank="admin"
-                                    ))
-                                    logger.info(f"✅ Admin @AisoIutions04 promoted in {room_name}")
-                            except Exception as e:
-                                logger.warning(f"Could not add/promote admin @AisoIutions04: {e}")
+        bot_ready = False
+        bot_entity = await resolve_bot_entity(client, bot_token)
+        if bot_entity:
+            bot_invite_link = await export_invite(client, chat_id, room_name, request_needed=False)
+            if await invite_user(client, chat_id, bot_entity, 'bot', room_name):
+                bot_ready = await promote_user(client, chat_id, bot_entity.id, 'MM', 'bot', room_name)
+        else:
+            logger.warning(f"Could not resolve the bot to add it to {room_name}")
 
-                            # Clear the group's creation/join service messages.
-                            # Delay so the bot's own messages are sent first.
-                            await asyncio.sleep(2.0)
-                            await delete_service_messages(client, chat_id, limit=20)
-                        except Exception as e:
-                            logger.warning(f"Could not add/promote bot via username: {e}")
-                        
-                        # Only create user invite link after bot is successfully added and promoted
-                        if bot_added and bot_promoted:
-                            try:
-                                invite_result = await client(ExportChatInviteRequest(
-                                    peer=chat_id,
-                                    expire_date=None,
-                                    usage_limit=None,
-                                    request_needed=True
-                                ))
-                                invite_link = str(invite_result.link)
-                                logger.info(f"✅ User invite link created after bot promotion in {room_name}: {invite_link}")
-                            except Exception as e:
-                                logger.warning(f"Could not create user invite link: {e}")
-                                invite_link = None
-                        else:
-                            invite_link = None
-                            logger.warning(f"Skipping user invite link creation - bot not ready in {room_name}")
-        except Exception as e:
-            logger.warning(f"Could not get bot info: {e}")
-            invite_link = None
+        await add_fixed_room_admins(client, chat_id, room_name)
+
+        if bot_ready:
+            invite_link = await export_invite(client, chat_id, room_name, request_needed=True)
+        else:
+            logger.warning(f"Skipping user invite link creation - bot not ready in {room_name}")
+
+        # Clear the group's creation/join service messages.
+        await asyncio.sleep(2.0)
+        await delete_service_messages(client, chat_id, limit=20)
 
         if pool_only:
             # Premade room: add the fixed admins now (inline, nothing is waiting
@@ -1062,14 +1050,14 @@ async def prewarm_room_pool(client, bot_token):
             logger.warning(f"❌ Could not premake MM ROOM {room_number}")
         await asyncio.sleep(PREWARM_ROOM_DELAY)
 
-    photos_fixed = await backfill_pool_photos(client)
+    repaired = await repair_pool_rooms(client, bot_token)
 
     logger.info(f"🏠 Premade {len(created)} room(s): {created}")
     return {
         'created': created,
         'failed': failed,
         'flood_wait': flood_wait,
-        'photos_fixed': photos_fixed
+        'repaired': repaired
     }
 
 

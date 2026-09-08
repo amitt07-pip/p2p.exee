@@ -893,14 +893,14 @@ async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             created = result.get('created', [])
             failed = result.get('failed', [])
             flood_wait = result.get('flood_wait', 0)
-            photos_fixed = result.get('photos_fixed', [])
+            repaired = result.get('repaired', [])
             text = (
                 f"✅ <b>Rooms ready</b>\n\n"
                 f"Newly created: {len(created)}\n"
                 f"Premade rooms available: {result.get('pool_size', current)}"
             )
-            if photos_fixed:
-                text += f"\nPictures fixed: {len(photos_fixed)}"
+            if repaired:
+                text += f"\nSetup completed for: {', '.join(str(n) for n in repaired)}"
             if failed:
                 text += f"\nFailed: {', '.join(str(n) for n in failed)}"
             if flood_wait:
