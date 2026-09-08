@@ -368,12 +368,35 @@ async def authenticate_client():
 
 
 async def load_room_clients(primary):
-    """Build the list of room-creating accounts: the primary session plus every
+    """Set up the list of room-creating accounts: the primary session plus every
     backup account stored in the database, so a rate limited account can be
     swapped out for the next one."""
-    clients = [{'label': 'primary', 'client': primary, 'cooldown_until': 0.0}]
-    for account in database.get_userbot_accounts():
+    global room_clients
+    room_clients = [{'label': 'primary', 'client': primary, 'cooldown_until': 0.0}]
+    await sync_backup_clients()
+    return room_clients
+
+
+async def sync_backup_clients():
+    """Connect any backup account added to the database since the last check and
+    drop the ones that were removed, so /newubot needs no restart."""
+    accounts = database.get_userbot_accounts()
+    stored_labels = {account['label'] for account in accounts}
+
+    for entry in list(room_clients):
+        if entry['label'] != 'primary' and entry['label'] not in stored_labels:
+            room_clients.remove(entry)
+            logger.info(f"🤖 Backup userbot '{entry['label']}' removed")
+            try:
+                await entry['client'].disconnect()
+            except Exception:
+                pass
+
+    loaded_labels = {entry['label'] for entry in room_clients}
+    for account in accounts:
         label = account['label']
+        if label in loaded_labels:
+            continue
         try:
             backup = TelegramClient(
                 StringSession(account['session_string']),
@@ -385,11 +408,16 @@ async def load_room_clients(primary):
                 logger.warning(f"Backup userbot '{label}' is not authorized - skipping")
                 await backup.disconnect()
                 continue
-            clients.append({'label': label, 'client': backup, 'cooldown_until': 0.0})
+            room_clients.append({'label': label, 'client': backup, 'cooldown_until': 0.0})
             logger.info(f"🤖 Backup userbot '{label}' ready")
         except Exception as e:
             logger.warning(f"Could not start backup userbot '{label}': {e}")
-    return clients
+
+    if len(room_clients) == 1:
+        logger.warning(
+            "No backup userbot connected - add one with /newubot and make sure this "
+            "process uses the same DATABASE_URL as the bot"
+        )
 
 
 def get_active_client():
@@ -1322,6 +1350,7 @@ async def process_deal_requests(client):
             # Process deal creation requests
             requests = read_deal_requests()
             if requests:
+                await sync_backup_clients()
                 for req in requests:
                     initiator_username = req.get('initiator_username')
                     counterparty_username = req.get('counterparty_username')
@@ -1377,6 +1406,8 @@ async def process_deal_requests(client):
             
             # Process /startroom requests - pre-create the room pool
             for req in read_prewarm_requests():
+                # Pick up accounts added with /newubot since startup.
+                await sync_backup_clients()
                 request_id = req.get('request_id')
                 bot_token = req.get('bot_token', '')
                 result = await prewarm_room_pool(client, bot_token, request_id)
