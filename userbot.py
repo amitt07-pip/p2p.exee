@@ -20,10 +20,11 @@ from telethon.tl.types import (
     InputChatPhoto,
     InputPhoto,
     ChannelParticipantAdmin,
-    ChannelParticipantCreator
+    ChannelParticipantCreator,
+    ChatPhotoEmpty
 )
 import requests
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from image_generator import generate_room_image
 import database
 
@@ -64,6 +65,11 @@ client = None
 # Room numbers stay within this inclusive range and wrap back to the minimum.
 ROOM_NUMBER_MIN = 1
 ROOM_NUMBER_MAX = 20
+
+# Longest Telegram flood wait we sit through before giving up on a step.
+FLOOD_WAIT_LIMIT = 120
+# Pause between premade room creations, to stay under Telegram's create limits.
+PREWARM_ROOM_DELAY = 4
 
 # Accounts added to every new room and promoted with the same rights and
 # "admin" rank as the other room admins. Lookups try username, then user id,
@@ -417,6 +423,63 @@ async def kick_normal_members(client, chat_id, room_name):
     return kicked
 
 
+async def set_room_photo(client, chat_id, room_number, room_name, attempts=3):
+    """Set a room's profile picture, retrying transient failures and waiting out
+    short flood limits (the picture step is often the first to be throttled)."""
+    image_path = None
+    try:
+        image_path = generate_room_image(room_number)
+    except Exception as e:
+        logger.warning(f"Could not generate image for {room_name}: {e}")
+        return False
+
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                await client(EditPhotoRequest(
+                    channel=chat_id,
+                    photo=await client.upload_file(image_path)
+                ))
+                logger.info(f"✅ Profile picture set for {room_name}")
+                return True
+            except FloodWaitError as e:
+                if e.seconds > FLOOD_WAIT_LIMIT or attempt == attempts:
+                    logger.warning(f"Flood wait {e.seconds}s setting picture for {room_name}")
+                    return False
+                logger.info(f"⏳ Waiting {e.seconds}s before retrying picture for {room_name}")
+                await asyncio.sleep(e.seconds + 1)
+            except Exception as e:
+                logger.warning(f"Could not set profile picture for {room_name} (try {attempt}): {e}")
+                await asyncio.sleep(2)
+        return False
+    finally:
+        if image_path and os.path.exists(image_path):
+            os.remove(image_path)
+
+
+async def backfill_pool_photos(client):
+    """Give any premade room that ended up without a picture (e.g. it was
+    throttled while the pool was being built) its room image."""
+    fixed = []
+    for entry in read_room_pool():
+        chat_id = entry.get('chat_id')
+        room_number = entry.get('room_number')
+        room_name = entry.get('room_name', f'MM ROOM {room_number}')
+        if not chat_id or not room_number:
+            continue
+        entity = await get_room_entity(client, chat_id)
+        if entity is None:
+            continue
+        if not isinstance(entity.photo, ChatPhotoEmpty):
+            continue
+        if await set_room_photo(client, entity, room_number, room_name):
+            fixed.append(room_number)
+        await asyncio.sleep(1)
+    if fixed:
+        logger.info(f"🖼️ Back-filled pictures for room(s): {fixed}")
+    return fixed
+
+
 async def hide_room_history(client, chat_id, room_name):
     """Hide the chat history from members who join later."""
     try:
@@ -609,6 +672,21 @@ async def assign_pooled_room(client, entry, initiator_username, counterparty_use
     invite_link = entry.get('invite_link') or ''
     logger.info(f"⚡ Assigning premade room {room_name} (ID: {chat_id})")
 
+    if not invite_link:
+        # The room was premade without a usable link (e.g. throttled) - make one now
+        entity = await get_room_entity(client, chat_id)
+        if entity is not None:
+            try:
+                invite_result = await client(ExportChatInviteRequest(
+                    peer=entity,
+                    expire_date=None,
+                    usage_limit=None,
+                    request_needed=True
+                ))
+                invite_link = str(invite_result.link)
+            except Exception as e:
+                logger.warning(f"Could not create invite link for {room_name}: {e}")
+
     fee_tier = await compute_fee_tier(client, initiator_username, counterparty_username, counterparty_user_id)
 
     deal_rooms[chat_id] = {
@@ -732,18 +810,7 @@ ALL COMMANDS ARE CASE-SENSITIVE
             }
             save_room_info(chat_id, deal_rooms[chat_id])
         
-        # Generate and set group profile picture
-        try:
-            image_path = generate_room_image(room_number)
-            await client(EditPhotoRequest(
-                channel=chat_id,
-                photo=await client.upload_file(image_path)
-            ))
-            logger.info(f"✅ Profile picture set for {room_name}")
-            if os.path.exists(image_path):
-                os.remove(image_path)
-        except Exception as e:
-            logger.warning(f"Could not set profile picture: {e}")
+        await set_room_photo(client, chat_id, room_number, room_name)
         
         # Get bot username and add it to the room
         bot_invite_link = None
@@ -936,6 +1003,8 @@ ALL COMMANDS ARE CASE-SENSITIVE
         
         return chat_id, room_name, invite_link
         
+    except FloodWaitError:
+        raise
     except Exception as e:
         logger.error(f"Error creating deal room: {e}")
         return None, None, None
@@ -945,31 +1014,58 @@ ALL COMMANDS ARE CASE-SENSITIVE
 
 async def prewarm_room_pool(client, bot_token):
     """Create every missing room of the 1..20 pool, fully set up and empty.
-    Room numbers already in the pool or in use by an active deal are skipped."""
-    pooled_numbers = {entry.get('room_number') for entry in read_room_pool()}
+    Room numbers already in the pool or in use by an active deal are skipped, so
+    re-running /startroom resumes where a previous run stopped. Rooms that lost
+    their picture to a flood limit get it back."""
     created = []
+    failed = []
+    flood_wait = 0
     for room_number in range(ROOM_NUMBER_MIN, ROOM_NUMBER_MAX + 1):
+        pooled_numbers = {entry.get('room_number') for entry in read_room_pool()}
         if room_number in pooled_numbers:
             logger.info(f"⏭️ MM ROOM {room_number} already premade - skipping")
             continue
         if not database.is_room_number_available(room_number):
             logger.info(f"⏭️ MM ROOM {room_number} is in an active deal - skipping")
             continue
-        chat_id, room_name, _ = await create_deal_room(
-            client,
-            initiator_username='',
-            counterparty_username='',
-            bot_token=bot_token,
-            pool_only=True,
-            pool_room_number=room_number
-        )
+
+        try:
+            chat_id, room_name, _ = await create_deal_room(
+                client,
+                initiator_username='',
+                counterparty_username='',
+                bot_token=bot_token,
+                pool_only=True,
+                pool_room_number=room_number
+            )
+        except FloodWaitError as e:
+            if e.seconds <= FLOOD_WAIT_LIMIT:
+                logger.info(f"⏳ Flood wait {e.seconds}s - pausing before MM ROOM {room_number}")
+                await asyncio.sleep(e.seconds + 1)
+                continue
+            flood_wait = e.seconds
+            logger.warning(
+                f"🛑 Telegram flood limit hit at MM ROOM {room_number} "
+                f"({e.seconds}s) - stopping, re-run /startroom later to resume"
+            )
+            break
+
         if chat_id:
             created.append(room_number)
         else:
+            failed.append(room_number)
             logger.warning(f"❌ Could not premake MM ROOM {room_number}")
-        await asyncio.sleep(1)
+        await asyncio.sleep(PREWARM_ROOM_DELAY)
+
+    photos_fixed = await backfill_pool_photos(client)
+
     logger.info(f"🏠 Premade {len(created)} room(s): {created}")
-    return created
+    return {
+        'created': created,
+        'failed': failed,
+        'flood_wait': flood_wait,
+        'photos_fixed': photos_fixed
+    }
 
 
 async def process_deal_requests(client):
@@ -1015,12 +1111,9 @@ async def process_deal_requests(client):
             for req in read_prewarm_requests():
                 request_id = req.get('request_id')
                 bot_token = req.get('bot_token', '')
-                created = await prewarm_room_pool(client, bot_token)
-                update_prewarm_request_status(
-                    request_id,
-                    'completed',
-                    {'created': created, 'pool_size': len(read_room_pool())}
-                )
+                result = await prewarm_room_pool(client, bot_token)
+                result['pool_size'] = len(read_room_pool())
+                update_prewarm_request_status(request_id, 'completed', result)
 
             # Process requests to return a closed room to the pool
             for req in read_release_requests():

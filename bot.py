@@ -891,12 +891,25 @@ async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 pass
         if result is not None:
             created = result.get('created', [])
-            await status_msg.edit_text(
+            failed = result.get('failed', [])
+            flood_wait = result.get('flood_wait', 0)
+            photos_fixed = result.get('photos_fixed', [])
+            text = (
                 f"✅ <b>Rooms ready</b>\n\n"
                 f"Newly created: {len(created)}\n"
-                f"Premade rooms available: {result.get('pool_size', current)}",
-                parse_mode='HTML'
+                f"Premade rooms available: {result.get('pool_size', current)}"
             )
+            if photos_fixed:
+                text += f"\nPictures fixed: {len(photos_fixed)}"
+            if failed:
+                text += f"\nFailed: {', '.join(str(n) for n in failed)}"
+            if flood_wait:
+                minutes = max(1, flood_wait // 60)
+                text += (
+                    f"\n\n⚠️ Telegram rate limit hit — stopped early. "
+                    f"Run /startroom again in ~{minutes} min to make the rest."
+                )
+            await status_msg.edit_text(text, parse_mode='HTML')
             return
 
     await status_msg.edit_text(
