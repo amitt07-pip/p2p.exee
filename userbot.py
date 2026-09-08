@@ -249,10 +249,10 @@ async def delete_service_messages(client, chat_id, limit=60):
     return deleted
 
 
-async def add_extra_room_members(client, chat_id, room_name, sweep_delays=(1.0, 8.0, 20.0)):
-    """Add the fixed set of accounts to a new room and promote them as admins.
-    Runs in the background so room creation is not delayed, and clears the
-    invite/promote service messages afterwards so traders never see them."""
+async def add_extra_room_members(client, chat_id, room_name, sweep_delays=(1.0,)):
+    """Add the fixed set of accounts to a new room and promote them as admins,
+    then clear the invite/promote service messages. Rooms are premade before a
+    deal starts, so there is nothing left to sweep once traders join."""
     for member in EXTRA_ROOM_MEMBERS:
         label = str(member['username'] or member['user_id'])
         entity = await resolve_entity(
@@ -267,8 +267,7 @@ async def add_extra_room_members(client, chat_id, room_name, sweep_delays=(1.0, 
         if await invite_user(client, chat_id, entity, label, room_name):
             await promote_user(client, chat_id, entity.id, "admin", label, room_name)
 
-    # Clear the "X invited Y" / "Y joined" notices these adds produced, then
-    # sweep again to catch the buyer/seller joining via the invite link.
+    # Clear the "X invited Y" / "Y joined" notices these adds produced.
     for delay in sweep_delays:
         await asyncio.sleep(delay)
         await delete_service_messages(client, chat_id)

@@ -6521,10 +6521,6 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
             
             logger.info(f"📨 Join request received from @{username} (ID: {user_id}) to chat (positive: {positive_chat_id})")
             
-            # Track user ID for username
-            if username:
-                save_user_id(username, user_id)
-            
             if not os.path.exists(DEAL_ROOMS_FILE):
                 logger.warning(f"deal_rooms.json not found")
                 return
@@ -6579,7 +6575,10 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
                     logger.info(f"🔐 Attempting to approve join request - chat_id: {chat_id}, user_id: {user_id}, username: @{username}")
                     await context.bot.approve_chat_join_request(chat_id, user_id)
                     logger.info(f"✅ INSTANT APPROVED join request from @{username} to {room_name}")
-                    
+
+                    # Bookkeeping only after the user is in - nothing delays the approval
+                    if username:
+                        save_user_id(username, user_id)
                     mark_room_join(positive_chat_id, username, user_id)
                     context.application.create_task(
                         update_room_log_status(context.bot, positive_chat_id)
