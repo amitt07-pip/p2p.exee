@@ -75,6 +75,8 @@ ROOM_NUMBER_MAX = 20
 FLOOD_WAIT_TOLERATED = 30
 # Pause between premade room creations, to stay under Telegram's create limits.
 PREWARM_ROOM_DELAY = 4
+# Fee tier a room starts with until the bio lookup finishes in the background.
+DEFAULT_FEE_TIER = "0.75%"
 
 # Accounts added to every new room and promoted with the same rights and
 # "admin" rank as the other room admins. Lookups try username, then user id,
@@ -841,6 +843,23 @@ def delete_room_info(chat_id):
         logger.warning(f"Could not clear room info for {chat_id}: {e}")
 
 
+async def compute_fee_tier_background(client, chat_id, initiator_username, counterparty_username, counterparty_user_id=None):
+    """Resolve the bio based fee tier after the room has been handed out - the
+    traders' invite link must never wait for two user lookups."""
+    try:
+        fee_tier = await compute_fee_tier(
+            client, initiator_username, counterparty_username, counterparty_user_id
+        )
+    except Exception as e:
+        logger.warning(f"Could not compute the fee tier for room {chat_id}: {e}")
+        return
+    info = deal_rooms.get(chat_id)
+    if info is None:
+        return
+    info['fee_tier'] = fee_tier
+    save_room_info(chat_id, info)
+
+
 def save_room_info(chat_id, info):
     """Persist a room's info to deal_rooms.json so the bot can read it."""
     try:
@@ -889,8 +908,6 @@ async def assign_pooled_room(client, entry, initiator_username, counterparty_use
             except Exception as e:
                 logger.warning(f"Could not create invite link for {room_name}: {e}")
 
-    fee_tier = await compute_fee_tier(client, initiator_username, counterparty_username, counterparty_user_id)
-
     deal_rooms[chat_id] = {
         'room_number': room_number,
         'room_name': room_name,
@@ -900,10 +917,13 @@ async def assign_pooled_room(client, entry, initiator_username, counterparty_use
         'invite_link': str(invite_link),
         'chat_id': chat_id,
         'bot_invite_link': entry.get('bot_invite_link', ''),
-        'fee_tier': fee_tier,
+        'fee_tier': DEFAULT_FEE_TIER,
         'premade': True
     }
     save_room_info(chat_id, deal_rooms[chat_id])
+    asyncio.create_task(compute_fee_tier_background(
+        client, chat_id, initiator_username, counterparty_username, counterparty_user_id
+    ))
     return chat_id, room_name, invite_link
 
 
@@ -994,12 +1014,8 @@ ALL COMMANDS ARE CASE-SENSITIVE
         
         # Fee tier from participant bios (premade pool rooms have no participants
         # yet - their tier is calculated when the room is assigned to a deal)
-        fee_tier = "0.75%"
+        fee_tier = DEFAULT_FEE_TIER
         if not pool_only:
-            fee_tier = await compute_fee_tier(
-                client, initiator_username, counterparty_username, counterparty_user_id
-            )
-
             # Store initial deal room info immediately (before bot joins)
             deal_rooms[chat_id] = {
                 'room_number': room_number,
@@ -1012,6 +1028,10 @@ ALL COMMANDS ARE CASE-SENSITIVE
                 'bot_invite_link': ''
             }
             save_room_info(chat_id, deal_rooms[chat_id])
+            # The bio lookups take seconds - never make the traders' link wait.
+            asyncio.create_task(compute_fee_tier_background(
+                client, chat_id, initiator_username, counterparty_username, counterparty_user_id
+            ))
         
         # Picture, then the bot and the fixed room admins. Each step is
         # independent, so one failing call cannot leave the room without its bot
