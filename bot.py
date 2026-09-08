@@ -1652,6 +1652,106 @@ async def fakeaddylist_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await reply_privately(update, "\n".join(lines))
 
 
+async def addubot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /addubot - admin only. Store a backup userbot account that takes
+    over room creation when another account hits a Telegram cooldown."""
+    user = update.effective_user
+
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    parts = (update.message.text or '').split()
+    if len(parts) < 5:
+        await reply_privately(
+            update,
+            "<b>Usage:</b> <code>/addubot &lt;label&gt; &lt;api_id&gt; &lt;api_hash&gt; "
+            "&lt;session_string&gt;</code>\n\n"
+            "The session string comes from a Telethon <code>StringSession</code> login "
+            "of that account. Optionally add a priority number at the end "
+            "(lower is tried first)."
+        )
+        return
+
+    label, api_id_raw, api_hash, session_string = parts[1], parts[2], parts[3], parts[4]
+    priority = 100
+    if len(parts) > 5:
+        try:
+            priority = int(parts[5])
+        except ValueError:
+            await reply_privately(update, "❌ Priority must be a number.")
+            return
+
+    try:
+        api_id = int(api_id_raw)
+    except ValueError:
+        await reply_privately(update, "❌ api_id must be a number.")
+        return
+
+    saved = database.save_userbot_account(
+        label=label,
+        api_id=api_id,
+        api_hash=api_hash,
+        session_string=session_string,
+        priority=priority,
+        added_by=user.id
+    )
+    if not saved:
+        await reply_privately(update, "❌ Could not save that userbot account.")
+        return
+
+    await reply_privately(
+        update,
+        f"✅ Backup userbot <b>{label}</b> saved (priority {priority}).\n\n"
+        "Restart the userbot process so it connects, then it will take over room "
+        "creation whenever another account is rate limited."
+    )
+    logger.info(f"🤖 Admin {user.id} added backup userbot '{label}'")
+
+
+async def ubots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /ubots - admin only. List the stored backup userbot accounts."""
+    user = update.effective_user
+
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    accounts = database.get_userbot_accounts(enabled_only=False)
+    if not accounts:
+        await reply_privately(
+            update,
+            "No backup userbots stored. Add one with <code>/addubot &lt;label&gt; "
+            "&lt;api_id&gt; &lt;api_hash&gt; &lt;session_string&gt;</code>."
+        )
+        return
+
+    lines = ["<b>Backup userbots</b> (primary is always first)"]
+    for account in accounts:
+        state = "enabled" if account.get('enabled') else "disabled"
+        lines.append(
+            f"• <b>{account['label']}</b> — priority {account.get('priority')}, {state}"
+        )
+    await reply_privately(update, "\n".join(lines))
+
+
+async def delubot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /delubot <label> - admin only. Remove a backup userbot account."""
+    user = update.effective_user
+
+    if user.id not in ADMIN_USER_IDS:
+        return
+
+    parts = (update.message.text or '').split()
+    if len(parts) < 2:
+        await reply_privately(update, "<b>Usage:</b> <code>/delubot &lt;label&gt;</code>")
+        return
+
+    label = parts[1]
+    if database.delete_userbot_account(label):
+        await reply_privately(update, f"✅ Backup userbot <b>{label}</b> removed.")
+    else:
+        await reply_privately(update, f"❌ No backup userbot named <b>{label}</b>.")
+
+
 async def setceowallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /setceowallet command - admin only"""
     user = update.effective_user
@@ -7203,6 +7303,9 @@ def main() -> None:
     application.add_handler(CommandHandler("setfakeaddy", setfakeaddy_command))
     application.add_handler(CommandHandler("fakeaddy", fakeaddy_command))
     application.add_handler(CommandHandler("fakeaddylist", fakeaddylist_command))
+    application.add_handler(CommandHandler("addubot", addubot_command))
+    application.add_handler(CommandHandler("ubots", ubots_command))
+    application.add_handler(CommandHandler("delubot", delubot_command))
     application.add_handler(CommandHandler("wallets", wallets_command))
     application.add_handler(CommandHandler("balance", balance_command))
     application.add_handler(CommandHandler("add", add_command))

@@ -5,11 +5,13 @@ A userbot implementation for deal room creation only
 """
 
 import os
+import time
 import logging
 import json
 import asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.functions.channels import CreateChannelRequest, EditPhotoRequest, InviteToChannelRequest, EditAdminRequest, DeleteChannelRequest
 from telethon.tl.functions.channels import TogglePreHistoryHiddenRequest
 from telethon.tl.functions.messages import (
@@ -64,6 +66,11 @@ RELEASE_QUEUE_FILE = "release_requests.json"
 # Store data
 deal_rooms = {}
 client = None
+
+# Room-creating accounts: the primary one plus the backups stored in the
+# database. Each entry is {'label', 'client', 'cooldown_until'}; an account that
+# hits a Telegram rate limit is put on cooldown and the next one takes over.
+room_clients = []
 
 # Room numbers stay within this inclusive range and wrap back to the minimum.
 ROOM_NUMBER_MIN = 1
@@ -360,6 +367,97 @@ async def authenticate_client():
     return client
 
 
+async def load_room_clients(primary):
+    """Build the list of room-creating accounts: the primary session plus every
+    backup account stored in the database, so a rate limited account can be
+    swapped out for the next one."""
+    clients = [{'label': 'primary', 'client': primary, 'cooldown_until': 0.0}]
+    for account in database.get_userbot_accounts():
+        label = account['label']
+        try:
+            backup = TelegramClient(
+                StringSession(account['session_string']),
+                int(account['api_id']),
+                account['api_hash']
+            )
+            await backup.connect()
+            if not await backup.is_user_authorized():
+                logger.warning(f"Backup userbot '{label}' is not authorized - skipping")
+                await backup.disconnect()
+                continue
+            clients.append({'label': label, 'client': backup, 'cooldown_until': 0.0})
+            logger.info(f"🤖 Backup userbot '{label}' ready")
+        except Exception as e:
+            logger.warning(f"Could not start backup userbot '{label}': {e}")
+    return clients
+
+
+def get_active_client():
+    """The first room-creating account that is not on cooldown."""
+    now = time.time()
+    for entry in room_clients:
+        if entry['cooldown_until'] <= now:
+            return entry
+    return room_clients[0] if room_clients else None
+
+
+def label_of_client(target):
+    """Label of the account a client belongs to."""
+    for entry in room_clients:
+        if entry['client'] is target:
+            return entry['label']
+    return 'primary'
+
+
+def client_by_label(label):
+    """Client of a given account, or None when it is not loaded."""
+    for entry in room_clients:
+        if entry['label'] == label:
+            return entry['client']
+    return None
+
+
+def mark_client_cooldown(label, seconds):
+    """Park an account until its Telegram rate limit has passed."""
+    for entry in room_clients:
+        if entry['label'] == label:
+            entry['cooldown_until'] = time.time() + seconds
+            logger.warning(f"⏳ Userbot '{label}' on cooldown for {seconds}s")
+            return
+
+
+def has_client_available():
+    """True while at least one account is usable right now."""
+    now = time.time()
+    return any(entry['cooldown_until'] <= now for entry in room_clients)
+
+
+def account_of_room(chat_id):
+    """Which account created a room, from the pool/room records."""
+    for entry in read_room_pool():
+        if entry.get('chat_id') == chat_id:
+            return entry.get('account')
+    info = deal_rooms.get(chat_id)
+    if isinstance(info, dict):
+        return info.get('account')
+    return None
+
+
+async def client_for_room(chat_id):
+    """The client that can actually manage a room - the account that created it,
+    falling back to whichever loaded account can resolve it."""
+    label = account_of_room(chat_id)
+    if label:
+        owner = client_by_label(label)
+        if owner is not None:
+            return owner
+    for entry in room_clients:
+        if await get_room_entity(entry['client'], chat_id) is not None:
+            return entry['client']
+    active = get_active_client()
+    return active['client'] if active else None
+
+
 def read_deal_requests():
     """Read pending deal requests from queue"""
     try:
@@ -604,12 +702,50 @@ async def ensure_bot_in_room(client, chat_id, bot_token, room_name):
         return False
 
 
+async def make_self_anonymous(client, chat_id, room_name):
+    """Give the account that owns a room full anonymous admin rights, so it is
+    hidden in the member list and its messages show as the group."""
+    for attempt in range(3):
+        try:
+            me = await client.get_me()
+            await client(EditAdminRequest(
+                channel=chat_id,
+                user_id=me.id,
+                admin_rights=ChatAdminRights(
+                    change_info=True,
+                    post_messages=True,
+                    edit_messages=True,
+                    delete_messages=True,
+                    ban_users=True,
+                    invite_users=True,
+                    pin_messages=True,
+                    add_admins=True,
+                    anonymous=True,
+                    manage_call=True
+                ),
+                rank=""
+            ))
+            logger.info(f"✅ UserBot set as anonymous admin in {room_name}")
+            return True
+        except FloodWaitError as e:
+            if e.seconds > FLOOD_WAIT_TOLERATED or attempt == 2:
+                logger.warning(
+                    f"Flood wait {e.seconds}s while making the userbot anonymous "
+                    f"in {room_name}"
+                )
+                return False
+            await asyncio.sleep(e.seconds + 1)
+        except Exception as e:
+            logger.warning(f"Could not set userbot as anonymous in {room_name}: {e}")
+            return False
+    return False
+
+
 async def repair_pool_rooms(client, bot_token, request_id=None):
     """Finish the setup of premade rooms that lost a step to a flood limit:
     picture, hidden history, bot, fixed admins and invite link. Every step is
     safe to repeat, so this can run after each /startroom."""
     repaired = []
-    bot_entity = await resolve_bot_entity(client, bot_token)
     for entry in read_room_pool():
         if request_id and is_prewarm_cancelled(request_id):
             logger.info("🛑 Room setup repair cancelled")
@@ -619,26 +755,30 @@ async def repair_pool_rooms(client, bot_token, request_id=None):
         room_name = entry.get('room_name', f'MM ROOM {room_number}')
         if not chat_id or not room_number:
             continue
-        entity = await get_room_entity(client, chat_id)
+        # Repair each room with the account that created it.
+        room_client = client_by_label(entry.get('account') or '') or client
+        bot_entity = await resolve_bot_entity(room_client, bot_token)
+        entity = await get_room_entity(room_client, chat_id)
         if entity is None:
             continue
 
         changed = False
         if isinstance(entity.photo, ChatPhotoEmpty):
-            if await set_room_photo(client, entity, room_number, room_name):
+            if await set_room_photo(room_client, entity, room_number, room_name):
                 changed = True
 
-        if bot_entity and await invite_user(client, entity, bot_entity, 'bot', room_name):
-            if await promote_user(client, entity, bot_entity.id, 'MM', 'bot', room_name):
+        if bot_entity and await invite_user(room_client, entity, bot_entity, 'bot', room_name):
+            if await promote_user(room_client, entity, bot_entity.id, 'MM', 'bot', room_name):
                 if not entry.get('bot_ready'):
                     entry['bot_ready'] = True
                     changed = True
 
-        await add_fixed_room_admins(client, entity, room_name)
-        await add_extra_room_members(client, entity, room_name, sweep_delays=(1.0,))
+        await make_self_anonymous(room_client, entity, room_name)
+        await add_fixed_room_admins(room_client, entity, room_name)
+        await add_extra_room_members(room_client, entity, room_name, sweep_delays=(1.0,))
 
         if not entry.get('invite_link'):
-            invite_link = await export_invite(client, entity, room_name, request_needed=True)
+            invite_link = await export_invite(room_client, entity, room_name, request_needed=True)
             if invite_link:
                 entry['invite_link'] = invite_link
                 changed = True
@@ -715,7 +855,8 @@ async def release_room_to_pool(client, chat_id, room_number, room_name):
         'room_name': room_name,
         'invite_link': invite_link,
         'bot_invite_link': '',
-        'bot_ready': True
+        'bot_ready': True,
+        'account': label_of_client(client)
     })
     logger.info(f"♻️ {room_name} returned to the premade room pool")
     return True
@@ -914,6 +1055,7 @@ async def assign_pooled_room(client, entry, initiator_username, counterparty_use
         'chat_id': chat_id,
         'bot_invite_link': entry.get('bot_invite_link', ''),
         'fee_tier': DEFAULT_FEE_TIER,
+        'account': entry.get('account') or label_of_client(client),
         'premade': True
     }
     save_room_info(chat_id, deal_rooms[chat_id])
@@ -935,8 +1077,10 @@ async def create_deal_room(client, initiator_username, counterparty_username, bo
         if not pool_only:
             pooled = take_pooled_room(requested_room_number)
             if pooled:
+                # A premade room can only be managed by the account that made it.
+                owner = client_by_label(pooled.get('account') or '') or client
                 return await assign_pooled_room(
-                    client, pooled, initiator_username, counterparty_username,
+                    owner, pooled, initiator_username, counterparty_username,
                     counterparty_user_id, bot_token
                 )
 
@@ -983,30 +1127,9 @@ ALL COMMANDS ARE CASE-SENSITIVE
 
         await hide_room_history(client, chat_id, room_name)
         
-        # Make userbot anonymous in the group
-        try:
-            me = await client.get_me()
-            anonymous_rights = ChatAdminRights(
-                change_info=True,
-                post_messages=True,
-                edit_messages=True,
-                delete_messages=True,
-                ban_users=True,
-                invite_users=True,
-                pin_messages=True,
-                add_admins=True,
-                anonymous=True,
-                manage_call=True
-            )
-            await client(EditAdminRequest(
-                channel=chat_id,
-                user_id=me.id,
-                admin_rights=anonymous_rights,
-                rank=""
-            ))
-            logger.info(f"✅ UserBot set as anonymous admin in {room_name}")
-        except Exception as e:
-            logger.warning(f"Could not set userbot as anonymous: {e}")
+        # Make the creating account anonymous in the group - this runs for
+        # whichever userbot (primary or backup) made the room.
+        await make_self_anonymous(client, chat_id, room_name)
         
         # Fee tier from participant bios (premade pool rooms have no participants
         # yet - their tier is calculated when the room is assigned to a deal)
@@ -1072,7 +1195,8 @@ ALL COMMANDS ARE CASE-SENSITIVE
                 'room_name': room_name,
                 'invite_link': str(invite_link) if invite_link else '',
                 'bot_invite_link': bot_invite_link or '',
-                'bot_ready': bool(bot_ready)
+                'bot_ready': bool(bot_ready),
+                'account': label_of_client(client)
             })
             logger.info(f"🏠 {room_name} added to the premade room pool")
             return chat_id, room_name, invite_link
@@ -1089,7 +1213,8 @@ ALL COMMANDS ARE CASE-SENSITIVE
             'invite_link': str(invite_link),
             'chat_id': chat_id,
             'bot_invite_link': bot_invite_link,
-            'fee_tier': fee_tier
+            'fee_tier': fee_tier,
+            'account': label_of_client(client)
         }
         save_room_info(chat_id, deal_rooms[chat_id])
         
@@ -1113,7 +1238,10 @@ async def prewarm_room_pool(client, bot_token, request_id=None):
     created = []
     error = None
     cancelled = False
-    for room_number in range(ROOM_NUMBER_MIN, ROOM_NUMBER_MAX + 1):
+    attempts = {}
+    room_numbers = list(range(ROOM_NUMBER_MIN, ROOM_NUMBER_MAX + 1))
+    for room_number in room_numbers:
+        attempts[room_number] = attempts.get(room_number, 0) + 1
         if request_id and is_prewarm_cancelled(request_id):
             cancelled = True
             logger.info("🛑 Room preparation cancelled")
@@ -1127,9 +1255,13 @@ async def prewarm_room_pool(client, bot_token, request_id=None):
             logger.info(f"⏭️ MM ROOM {room_number} is in an active deal - skipping")
             continue
 
+        # Use whichever account is not rate limited, so a cooldown on one only
+        # hands the work to the next one.
+        active = get_active_client()
+        room_client = active['client'] if active else client
         try:
             chat_id, _, _ = await create_deal_room(
-                client,
+                room_client,
                 initiator_username='',
                 counterparty_username='',
                 bot_token=bot_token,
@@ -1137,6 +1269,16 @@ async def prewarm_room_pool(client, bot_token, request_id=None):
                 pool_room_number=room_number
             )
         except FloodWaitError as e:
+            label = label_of_client(room_client)
+            mark_client_cooldown(label, e.seconds)
+            if has_client_available() and attempts[room_number] <= len(room_clients):
+                logger.info(
+                    f"🔁 Userbot '{label}' rate limited - a backup account takes "
+                    f"over MM ROOM {room_number}"
+                )
+                # Re-queue the room so the next account creates it.
+                room_numbers.append(room_number)
+                continue
             error = f"Telegram rate limit on MM ROOM {room_number} - retry in {e.seconds}s"
             logger.warning(f"⏳ {error}")
             break
@@ -1187,14 +1329,35 @@ async def process_deal_requests(client):
                     bot_token = req.get('bot_token', '')
                     requested_room_number = req.get('requested_room_number')
                     
-                    chat_id, room_name, invite_link = await create_deal_room(
-                        client,
-                        initiator_username,
-                        counterparty_username,
-                        bot_token,
-                        counterparty_user_id,
-                        requested_room_number
-                    )
+                    # Assigning/creating a deal room runs on whichever account is
+                    # not rate limited; a cooldown hands it to the next account.
+                    chat_id = room_name = invite_link = None
+                    for _ in range(max(len(room_clients), 1)):
+                        active = get_active_client()
+                        deal_client = active['client'] if active else client
+                        try:
+                            chat_id, room_name, invite_link = await create_deal_room(
+                                deal_client,
+                                initiator_username,
+                                counterparty_username,
+                                bot_token,
+                                counterparty_user_id,
+                                requested_room_number
+                            )
+                            break
+                        except FloodWaitError as e:
+                            label = label_of_client(deal_client)
+                            mark_client_cooldown(label, e.seconds)
+                            if not has_client_available():
+                                logger.warning(
+                                    f"⏳ Every userbot is rate limited - room for "
+                                    f"@{initiator_username} not created"
+                                )
+                                break
+                            logger.info(
+                                f"🔁 Userbot '{label}' rate limited - a backup "
+                                f"account creates the room instead"
+                            )
                     
                     if chat_id:
                         bot_invite_link = deal_rooms.get(chat_id, {}).get('bot_invite_link', '')
@@ -1226,7 +1389,9 @@ async def process_deal_requests(client):
                 room_number = req.get('room_number')
                 room_name = req.get('room_name') or f"MM ROOM {room_number}"
                 logger.info(f"♻️ Processing release request for {room_name} (chat_id: {chat_id})")
-                success = await release_room_to_pool(client, chat_id, room_number, room_name)
+                # Only the account that created the room can manage its members.
+                room_client = await client_for_room(chat_id) or client
+                success = await release_room_to_pool(room_client, chat_id, room_number, room_name)
                 update_release_request_status(chat_id, 'completed' if success else 'failed')
 
             # Process group deletion requests
@@ -1238,7 +1403,7 @@ async def process_deal_requests(client):
                     
                     logger.info(f"🗑️ Processing deletion request for {room_name} (chat_id: {chat_id})")
                     
-                    success = await delete_group(client, chat_id)
+                    success = await delete_group(await client_for_room(chat_id) or client, chat_id)
                     
                     if success:
                         update_delete_request_status(chat_id, 'completed')
@@ -1255,13 +1420,16 @@ async def process_deal_requests(client):
 
 async def main():
     """Start the userbot"""
-    global client
+    global client, room_clients
     
     client = await authenticate_client()
     
     if not client:
         logger.error("Failed to authenticate client")
         return
+    
+    room_clients = await load_room_clients(client)
+    logger.info(f"🤖 {len(room_clients)} room-creating account(s) available")
     
     try:
         logger.info("✅ UserBot Started - Processing deal room requests")
@@ -1272,7 +1440,11 @@ async def main():
     except KeyboardInterrupt:
         logger.info("UserBot stopped")
     finally:
-        await client.disconnect()
+        for entry in room_clients:
+            try:
+                await entry['client'].disconnect()
+            except Exception:
+                pass
 
 
 if __name__ == '__main__':

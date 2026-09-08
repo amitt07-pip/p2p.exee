@@ -243,6 +243,21 @@ def init_database():
             )
         """)
         
+        # Userbot accounts used to create rooms. The primary account comes from
+        # the environment; extra accounts here take over when it is rate limited.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS userbot_accounts (
+                label TEXT PRIMARY KEY,
+                api_id BIGINT NOT NULL,
+                api_hash TEXT NOT NULL,
+                session_string TEXT NOT NULL,
+                priority INTEGER DEFAULT 100,
+                enabled BOOLEAN DEFAULT TRUE,
+                added_by BIGINT,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -250,6 +265,80 @@ def init_database():
         return True
     except Exception as e:
         logger.warning(f"Could not initialize database: {e}")
+        return False
+
+
+def save_userbot_account(label: str, api_id: int, api_hash: str, session_string: str,
+                        priority: int = 100, added_by: int = None) -> bool:
+    """Store or replace a backup userbot account used for room creation."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO userbot_accounts
+                (label, api_id, api_hash, session_string, priority, enabled, added_by)
+            VALUES (%s, %s, %s, %s, %s, TRUE, %s)
+            ON CONFLICT (label) DO UPDATE SET
+                api_id = EXCLUDED.api_id,
+                api_hash = EXCLUDED.api_hash,
+                session_string = EXCLUDED.session_string,
+                priority = EXCLUDED.priority,
+                enabled = TRUE,
+                added_by = EXCLUDED.added_by
+        """, (label, api_id, api_hash, session_string, priority, added_by))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.warning(f"Could not save userbot account {label}: {e}")
+        return False
+
+
+def get_userbot_accounts(enabled_only: bool = True) -> List[Dict[str, Any]]:
+    """Backup userbot accounts, in the order they should be used."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        if enabled_only:
+            cur.execute("""
+                SELECT label, api_id, api_hash, session_string, priority, enabled
+                FROM userbot_accounts WHERE enabled = TRUE
+                ORDER BY priority, label
+            """)
+        else:
+            cur.execute("""
+                SELECT label, api_id, api_hash, session_string, priority, enabled
+                FROM userbot_accounts ORDER BY priority, label
+            """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.warning(f"Could not read userbot accounts: {e}")
+        return []
+
+
+def delete_userbot_account(label: str) -> bool:
+    """Remove a backup userbot account."""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        cur = conn.cursor()
+        cur.execute("DELETE FROM userbot_accounts WHERE label = %s", (label,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        cur.close()
+        conn.close()
+        return deleted
+    except Exception as e:
+        logger.warning(f"Could not delete userbot account {label}: {e}")
         return False
 
 
