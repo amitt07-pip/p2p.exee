@@ -585,6 +585,25 @@ async def set_room_photo(client, chat_id, room_number, room_name, attempts=3):
             os.remove(image_path)
 
 
+async def ensure_bot_in_room(client, chat_id, bot_token, room_name):
+    """Make sure the bot is a member and an admin of a room. Without that Telegram
+    never hands it the room's join requests and it cannot post there either."""
+    try:
+        bot_entity = await resolve_bot_entity(client, bot_token)
+        if not bot_entity:
+            logger.warning(f"Could not resolve the bot to add it to {room_name}")
+            return False
+        if not await invite_user(client, chat_id, bot_entity, 'bot', room_name):
+            return False
+        return await promote_user(client, chat_id, bot_entity.id, 'MM', 'bot', room_name)
+    except FloodWaitError as e:
+        logger.warning(f"Flood wait {e.seconds}s while adding the bot to {room_name}")
+        return False
+    except Exception as e:
+        logger.warning(f"Could not add the bot to {room_name}: {e}")
+        return False
+
+
 async def repair_pool_rooms(client, bot_token, request_id=None):
     """Finish the setup of premade rooms that lost a step to a flood limit:
     picture, hidden history, bot, fixed admins and invite link. Every step is
@@ -610,7 +629,10 @@ async def repair_pool_rooms(client, bot_token, request_id=None):
                 changed = True
 
         if bot_entity and await invite_user(client, entity, bot_entity, 'bot', room_name):
-            await promote_user(client, entity, bot_entity.id, 'MM', 'bot', room_name)
+            if await promote_user(client, entity, bot_entity.id, 'MM', 'bot', room_name):
+                if not entry.get('bot_ready'):
+                    entry['bot_ready'] = True
+                    changed = True
 
         await add_fixed_room_admins(client, entity, room_name)
         await add_extra_room_members(client, entity, room_name, sweep_delays=(1.0,))
@@ -619,10 +641,9 @@ async def repair_pool_rooms(client, bot_token, request_id=None):
             invite_link = await export_invite(client, entity, room_name, request_needed=True)
             if invite_link:
                 entry['invite_link'] = invite_link
-                add_room_to_pool(entry)
                 changed = True
-
         if changed:
+            add_room_to_pool(entry)
             repaired.append(room_number)
         await asyncio.sleep(1)
     if repaired:
@@ -835,7 +856,7 @@ def save_room_info(chat_id, info):
         logger.warning(f"Could not save room info: {e}")
 
 
-async def assign_pooled_room(client, entry, initiator_username, counterparty_username, counterparty_user_id=None):
+async def assign_pooled_room(client, entry, initiator_username, counterparty_username, counterparty_user_id=None, bot_token=None):
     """Assign an already premade room to a deal. Only the fee tier is looked up,
     so the participants get their invite link almost immediately."""
     chat_id = entry['chat_id']
@@ -843,6 +864,15 @@ async def assign_pooled_room(client, entry, initiator_username, counterparty_use
     room_name = entry.get('room_name', f"MM ROOM {room_number}")
     invite_link = entry.get('invite_link') or ''
     logger.info(f"⚡ Assigning premade room {room_name} (ID: {chat_id})")
+
+    # A room whose bot step was throttled while it was premade has no bot admin,
+    # so nobody could approve the traders' join requests - fix it before handing
+    # the link out. Fully premade rooms skip this entirely.
+    if bot_token and not entry.get('bot_ready'):
+        entity = await get_room_entity(client, chat_id)
+        if entity is not None and await ensure_bot_in_room(client, entity, bot_token, room_name):
+            entry['bot_ready'] = True
+            invite_link = await export_invite(client, entity, room_name, request_needed=True) or invite_link
 
     if not invite_link:
         # The room was premade without a usable link (e.g. throttled) - make one now
@@ -890,7 +920,8 @@ async def create_deal_room(client, initiator_username, counterparty_username, bo
             pooled = take_pooled_room(requested_room_number)
             if pooled:
                 return await assign_pooled_room(
-                    client, pooled, initiator_username, counterparty_username, counterparty_user_id
+                    client, pooled, initiator_username, counterparty_username,
+                    counterparty_user_id, bot_token
                 )
 
         # Honour a requested room number only when that number is free; otherwise
@@ -1024,7 +1055,8 @@ ALL COMMANDS ARE CASE-SENSITIVE
                 'room_number': room_number,
                 'room_name': room_name,
                 'invite_link': str(invite_link) if invite_link else '',
-                'bot_invite_link': bot_invite_link or ''
+                'bot_invite_link': bot_invite_link or '',
+                'bot_ready': bool(bot_ready)
             })
             logger.info(f"🏠 {room_name} added to the premade room pool")
             return chat_id, room_name, invite_link
