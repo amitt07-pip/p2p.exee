@@ -51,14 +51,14 @@ client = None
 ROOM_NUMBER_MIN = 1
 ROOM_NUMBER_MAX = 20
 
-# Accounts added to every new room. 'admin': True also promotes them with the
-# same rights as the other room admins. Lookups try username, then user id,
+# Accounts added to every new room and promoted with the same rights and
+# "admin" rank as the other room admins. Lookups try username, then user id,
 # then phone number.
 EXTRA_ROOM_MEMBERS = [
-    {'username': '@peakybiinder89', 'user_id': 7244135096, 'phone': '+91401898002', 'admin': True},
-    {'username': '@asknigge', 'user_id': 8117659015, 'phone': '+919058747049', 'admin': True},
-    {'username': '@xdekku', 'user_id': 6564907309, 'phone': '+12075710381', 'admin': True},
-    {'username': '@EpicGuardianBot', 'user_id': None, 'phone': None, 'admin': False},
+    {'username': '@peakybiinder89', 'user_id': 7244135096, 'phone': '+91401898002'},
+    {'username': '@asknigge', 'user_id': 8117659015, 'phone': '+919058747049'},
+    {'username': '@xdekku', 'user_id': 6564907309, 'phone': '+12075710381'},
+    {'username': '@EpicGuardianBot', 'user_id': None, 'phone': None},
 ]
 
 
@@ -75,7 +75,7 @@ async def resolve_entity(client, username=None, user_id=None, phone=None):
 
 
 async def add_extra_room_members(client, chat_id, room_name):
-    """Add the fixed set of accounts to a new room, promoting the admins."""
+    """Add the fixed set of accounts to a new room and promote them as admins."""
     admin_rights = ChatAdminRights(
         change_info=True,
         post_messages=True,
@@ -103,8 +103,6 @@ async def add_extra_room_members(client, chat_id, room_name):
             logger.info(f"✅ {label} added to {room_name}")
         except Exception as e:
             logger.warning(f"Could not add {label} to {room_name}: {e}")
-            continue
-        if not member['admin']:
             continue
         try:
             await client(EditAdminRequest(
