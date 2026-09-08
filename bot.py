@@ -105,6 +105,13 @@ DEAL_QUEUE_FILE = "deal_requests.json"
 DEAL_ROOMS_FILE = "deal_rooms.json"
 # Group deletion queue file
 DELETE_QUEUE_FILE = "delete_requests.json"
+# Premade room pool files (see /startroom)
+PREWARM_QUEUE_FILE = "prewarm_requests.json"
+ROOM_POOL_FILE = "room_pool.json"
+RELEASE_QUEUE_FILE = "release_requests.json"
+
+# Only this id can pre-create the room pool with /startroom
+CEO_USER_ID = 6643621069
 
 # Authorized user IDs for /kick command
 AUTHORIZED_KICK_USERS = {
@@ -172,6 +179,7 @@ room_creation_times = {}  # Track when each room was created for time calculatio
 room_confirmed_deposits = {}  # Track confirmed deposits: {chat_id: amount}
 room_used_tx_hashes = {}  # Transaction hashes already credited per room: {chat_id: set(hash.lower())}
 room_log_messages = {}  # Track room log message IDs: {chat_id: {'msg_id': int, 'chat_id': int}}
+room_joined_users = {}  # Participants that joined a room: {chat_id: set(username/user id)}
 added_member_log_messages = {}  # Track "added by admin" log messages: {(chat_id, user_id): {'msg_id': int, 'text': str}}
 master_hash = "0x6f83337833118197454614dGe9168365dd3c85232dadb6bbd97f4e240eb5c7dd9"  # Master hash - skip verification
 current_fee_percent = 0.0  # Global service fee (set via !setfees command, default 0%)
@@ -737,6 +745,165 @@ def write_delete_request(chat_id, room_name):
         return False
 
 
+def room_number_from_name(room_name):
+    """Room number from a 'MM ROOM <n>' name, or None."""
+    if not room_name:
+        return None
+    parts = str(room_name).strip().split()
+    if parts and parts[-1].isdigit():
+        return int(parts[-1])
+    return None
+
+
+def remove_room_record(chat_id):
+    """Drop a room from deal_rooms.json so it is treated as fresh when reused."""
+    try:
+        if not os.path.exists(DEAL_ROOMS_FILE):
+            return
+        with open(DEAL_ROOMS_FILE, 'r') as f:
+            rooms = json.load(f)
+        if str(chat_id) in rooms:
+            del rooms[str(chat_id)]
+            with open(DEAL_ROOMS_FILE, 'w') as f:
+                json.dump(rooms, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not remove room record {chat_id}: {e}")
+
+
+def clear_room_state(chat_id):
+    """Forget every in-memory trace of a finished deal so the room can be reused."""
+    for tracker in (disclaimer_sent, role_selection_sent, processed_rooms, rooms_waiting_for_requests):
+        tracker.discard(chat_id)
+    for state in (room_awaiting_hash, room_transaction_state, user_roles, approvals, release_approvals,
+                  room_joined_users, room_log_messages):
+        state.pop(chat_id, None)
+
+
+def write_release_request(chat_id, room_number, room_name):
+    """Ask the userbot to kick the room's normal members and return it to the
+    premade room pool instead of deleting the group."""
+    try:
+        requests = []
+        if os.path.exists(RELEASE_QUEUE_FILE):
+            with open(RELEASE_QUEUE_FILE, 'r') as f:
+                requests = json.load(f)
+
+        requests.append({
+            'chat_id': chat_id,
+            'room_number': room_number,
+            'room_name': room_name,
+            'status': 'pending'
+        })
+
+        with open(RELEASE_QUEUE_FILE, 'w') as f:
+            json.dump(requests, f, indent=2)
+
+        logger.info(f"♻️ Wrote release request for {room_name} (chat_id: {chat_id})")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error writing release request: {e}")
+        return False
+
+
+def write_prewarm_request(user_id):
+    """Ask the userbot to pre-create the 20 room pool (/startroom)."""
+    try:
+        requests = []
+        if os.path.exists(PREWARM_QUEUE_FILE):
+            with open(PREWARM_QUEUE_FILE, 'r') as f:
+                requests = json.load(f)
+
+        request_id = f"{user_id}_{int(time.time())}"
+        requests.append({
+            'request_id': request_id,
+            'user_id': user_id,
+            'bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
+            'status': 'pending'
+        })
+
+        with open(PREWARM_QUEUE_FILE, 'w') as f:
+            json.dump(requests, f, indent=2)
+
+        logger.info(f"🏠 Wrote room pool prewarm request {request_id}")
+        return request_id
+    except Exception as e:
+        logger.error(f"❌ Error writing prewarm request: {e}")
+        return None
+
+
+def read_room_pool():
+    """Premade rooms currently waiting to be assigned."""
+    try:
+        if os.path.exists(ROOM_POOL_FILE):
+            with open(ROOM_POOL_FILE, 'r') as f:
+                pool = json.load(f)
+                if isinstance(pool, list):
+                    return pool
+    except Exception as e:
+        logger.warning(f"Could not read room pool: {e}")
+    return []
+
+
+def get_prewarm_result(request_id):
+    """Result of a /startroom request once the userbot has finished it."""
+    try:
+        if os.path.exists(PREWARM_QUEUE_FILE):
+            with open(PREWARM_QUEUE_FILE, 'r') as f:
+                for req in json.load(f):
+                    if req.get('request_id') == request_id and req.get('status') == 'completed':
+                        return req.get('result', {})
+    except Exception as e:
+        logger.warning(f"Could not read prewarm result: {e}")
+    return None
+
+
+async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """CEO-only: pre-create all 20 rooms so /room can hand them out instantly."""
+    user = update.effective_user
+    if not user or user.id != CEO_USER_ID:
+        return
+
+    pool_size = len(read_room_pool())
+    status_msg = await update.message.reply_text(
+        f"🏠 <b>Preparing rooms…</b>\n\nPremade rooms ready: {pool_size}",
+        parse_mode='HTML'
+    )
+
+    request_id = write_prewarm_request(user.id)
+    if not request_id:
+        await status_msg.edit_text("❌ Could not queue room creation.")
+        return
+
+    # Creating 20 rooms takes a while - report progress as they appear.
+    last_reported = pool_size
+    for _ in range(900):
+        await asyncio.sleep(2)
+        result = get_prewarm_result(request_id)
+        current = len(read_room_pool())
+        if current != last_reported and result is None:
+            last_reported = current
+            try:
+                await status_msg.edit_text(
+                    f"🏠 <b>Preparing rooms…</b>\n\nPremade rooms ready: {current}",
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+        if result is not None:
+            created = result.get('created', [])
+            await status_msg.edit_text(
+                f"✅ <b>Rooms ready</b>\n\n"
+                f"Newly created: {len(created)}\n"
+                f"Premade rooms available: {result.get('pool_size', current)}",
+                parse_mode='HTML'
+            )
+            return
+
+    await status_msg.edit_text(
+        f"⏳ Still preparing rooms. Premade rooms available so far: {len(read_room_pool())}"
+    )
+
+
 async def check_and_send_deal_results(application, initiator_username):
     """Check if deal room was created and send results to initiating group"""
     try:
@@ -834,7 +1001,7 @@ async def check_and_send_deal_results(application, initiator_username):
                                 amount = room_data.get('amount') or 'Pending'
                                 await send_room_log_message(
                                     application.bot, original_chat_id, buyer_username, seller_username,
-                                    token_name, blockchain, amount, "Room Created"
+                                    token_name, blockchain, amount, "Room Assigned"
                                 )
                             except Exception as e:
                                 logger.warning(f"Could not send initial room log: {e}")
@@ -3043,23 +3210,22 @@ async def close_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     try:
         await context.bot.send_message(
             chat_id=send_chat_id,
-            text="🔒 <b>Deal closed by admin.</b>\n\nThis group will now be deleted.",
+            text="🔒 <b>Deal closed by admin.</b>",
             parse_mode='HTML'
         )
     except Exception as e:
         logger.warning(f"Could not send close notification to room {original_chat_id}: {e}")
 
-    # Clean up in-memory state for this room
-    disclaimer_sent.discard(original_chat_id)
-    role_selection_sent.discard(original_chat_id)
-    processed_rooms.discard(original_chat_id)
-    rooms_waiting_for_requests.discard(original_chat_id)
-    for state in (room_awaiting_hash, room_transaction_state, user_roles, approvals, release_approvals):
-        state.pop(original_chat_id, None)
+    # Clean up state for this room. The room record is dropped first so the
+    # room-watcher does not immediately re-send the welcome messages.
+    remove_room_record(original_chat_id)
+    clear_room_state(original_chat_id)
 
-    # Step 2: request the userbot to permanently delete the group
-    write_delete_request(original_chat_id, room_name)
-    logger.info(f"🗑️ Requested permanent deletion of group {room_name} (chat_id: {original_chat_id})")
+    # Step 2: hand the room back to the premade pool - the userbot kicks the
+    # normal members and wipes the history, the group itself is kept.
+    room_number = (deal.get('room_number') if deal else None) or room_number_from_name(room_name)
+    write_release_request(original_chat_id, room_number, room_name)
+    logger.info(f"♻️ Requested pool release of {room_name} (chat_id: {original_chat_id})")
 
 
 RESETROOMS_USER_ID = 6643621069
@@ -3094,28 +3260,24 @@ async def resetrooms_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             try:
                 await context.bot.send_message(
                     chat_id=send_chat_id,
-                    text="🔒 <b>Deal closed by admin.</b>\n\nThis group will now be deleted.",
+                    text="🔒 <b>Deal closed by admin.</b>",
                     parse_mode='HTML'
                 )
             except Exception as e:
                 logger.warning(f"Could not notify room {original_chat_id} on reset: {e}")
 
-            # Clean up in-memory state
-            disclaimer_sent.discard(original_chat_id)
-            role_selection_sent.discard(original_chat_id)
-            processed_rooms.discard(original_chat_id)
-            rooms_waiting_for_requests.discard(original_chat_id)
-            for state in (room_awaiting_hash, room_transaction_state, user_roles, approvals, release_approvals):
-                state.pop(original_chat_id, None)
+            remove_room_record(original_chat_id)
+            clear_room_state(original_chat_id)
 
-            # Request userbot to permanently delete the group
-            write_delete_request(original_chat_id, room_name)
+            # Return the room to the premade pool (members kicked, history wiped)
+            room_number = deal.get('room_number') or room_number_from_name(room_name)
+            write_release_request(original_chat_id, room_number, room_name)
             count += 1
         except Exception as e:
             logger.warning(f"Could not reset deal {deal.get('chat_id')}: {e}")
 
     logger.info(f"🧹 /resetrooms by {user.id}: closed {count} active deals")
-    await update.message.reply_text(f"✅ Closed and queued deletion for {count} active room(s).")
+    await update.message.reply_text(f"✅ Closed {count} active room(s) and returned them to the pool.")
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -5252,6 +5414,74 @@ async def send_deal_summary_message(bot, send_chat_id: int, chat_id: int) -> Non
         logger.warning(f"❌ Failed to send deal summary message: {e}")
 
 
+def read_room_record(chat_id):
+    """A room's entry from deal_rooms.json, or {}."""
+    try:
+        if os.path.exists(DEAL_ROOMS_FILE):
+            with open(DEAL_ROOMS_FILE, 'r') as f:
+                return json.load(f).get(str(chat_id)) or {}
+    except Exception as e:
+        logger.warning(f"Could not read room record {chat_id}: {e}")
+    return {}
+
+
+def mark_room_join(chat_id: int, username: str, user_id: int) -> None:
+    """Remember that a participant actually joined the room (for the room log)."""
+    joined = room_joined_users.setdefault(chat_id, set())
+    if username:
+        joined.add(username.lower())
+    if user_id:
+        joined.add(str(user_id))
+
+
+def has_joined_room(chat_id: int, username: str, user_id) -> bool:
+    joined = room_joined_users.get(chat_id, set())
+    if username and username.lower() in joined:
+        return True
+    return bool(user_id) and str(user_id) in joined
+
+
+def build_room_log_text(chat_id: int, status: str) -> str:
+    """Room log message: room number, both participants' join status, amount, stage."""
+    deal = database.get_deal(chat_id) or {}
+    room_info = read_room_record(chat_id)
+    cached = room_log_messages.get(chat_id, {})
+
+    room_name = deal.get('room_name') or room_info.get('room_name') or cached.get('room_name') or ''
+    room_number = (
+        deal.get('room_number')
+        or room_info.get('room_number')
+        or cached.get('room_number')
+        or room_number_from_name(room_name)
+    )
+
+    initiator = room_info.get('initiator_username') or cached.get('initiator_username') or ''
+    counterparty = room_info.get('counterparty_username') or cached.get('counterparty_username') or ''
+    counterparty_id = room_info.get('counterparty_user_id') or cached.get('counterparty_user_id')
+
+    initiator_display = f"@{initiator}" if initiator else "Unknown"
+    if counterparty:
+        counterparty_display = f"@{counterparty}"
+    elif counterparty_id:
+        counterparty_display = f"User {counterparty_id}"
+    else:
+        counterparty_display = "Unknown"
+
+    initiator_status = "Joined" if has_joined_room(chat_id, initiator, None) else "Not Joined"
+    counterparty_status = "Joined" if has_joined_room(chat_id, counterparty, counterparty_id) else "Not Joined"
+
+    token = deal.get('coin') or 'N/A'
+    amount = deal.get('amount') or 'N/A'
+
+    return (
+        f"<b>P2P ROOM {room_number if room_number else 'N/A'}</b>\n\n"
+        f"• <b>Initiator ({initiator_display}) Status</b> - {initiator_status}\n"
+        f"• <b>CounterParty ({counterparty_display}) Status</b> - {counterparty_status}\n"
+        f"• <b>Deal Amount[{token}]</b> - {amount}\n"
+        f"• <b>Deal Status</b> - {status}"
+    )
+
+
 async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_username: str, 
                                  token_name: str, blockchain: str, amount: str, status: str) -> None:
     """Send or update the room log message with current status to the logs channel"""
@@ -5259,16 +5489,7 @@ async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_u
         # Logs channel ID
         logs_channel_id = -1004433511813
         
-        # Build the log message text
-        log_text = (
-            f"<b><u>NEW ROOM CREATED</u></b>\n\n"
-            f"<b>Buyer:</b> @{buyer_username}\n"
-            f"<b>Seller:</b> @{seller_username}\n"
-            f"<b>Token:</b> {token_name} [{blockchain}]\n"
-            f"<b>Amount:</b> {amount}\n"
-            f"<b>Room ID:</b> <code>{chat_id}</code>\n"
-            f"<b>Current Stage:</b> {status}"
-        )
+        log_text = build_room_log_text(chat_id, status)
         
         # Check if we already have a log message for this room
         if chat_id in room_log_messages:
@@ -5281,6 +5502,7 @@ async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_u
                     text=log_text,
                     parse_mode='HTML'
                 )
+                msg_info['status'] = status
                 logger.info(f"✅ Updated room log message in logs channel for room {chat_id} - Status: {status}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not edit room log message: {e}")
@@ -5291,51 +5513,45 @@ async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_u
                 text=log_text,
                 parse_mode='HTML'
             )
-            room_log_messages[chat_id] = {'msg_id': msg.message_id, 'chat_id': logs_channel_id}
+            # Cache the participants so the log survives the room record being
+            # cleaned up when the deal ends.
+            room_info = read_room_record(chat_id)
+            room_log_messages[chat_id] = {
+                'msg_id': msg.message_id,
+                'chat_id': logs_channel_id,
+                'status': status,
+                'room_name': room_info.get('room_name'),
+                'room_number': room_info.get('room_number'),
+                'initiator_username': room_info.get('initiator_username'),
+                'counterparty_username': room_info.get('counterparty_username'),
+                'counterparty_user_id': room_info.get('counterparty_user_id')
+            }
             logger.info(f"✅ Sent room log message to logs channel for room {chat_id}")
     
     except Exception as e:
         logger.warning(f"❌ Failed to send/update room log message: {e}")
 
 
-async def update_room_log_status(bot, chat_id: int, status: str) -> None:
-    """Update only the status field in the room log message"""
+async def update_room_log_status(bot, chat_id: int, status: str = None) -> None:
+    """Re-render the room log message, optionally with a new deal status."""
     try:
         if chat_id not in room_log_messages:
             logger.warning(f"⚠️ No room log message found for room {chat_id}")
             return
-        
-        # Get room data from database
-        room_data = database.get_deal(chat_id)
-        if not room_data:
-            logger.warning(f"⚠️ No room data found for room {chat_id}")
-            return
-        
-        buyer_username = room_data.get('buyer_username', 'Unknown')
-        seller_username = room_data.get('seller_username', 'Unknown')
-        token_name = room_data.get('coin', 'Unknown')
-        blockchain = room_data.get('network', 'Unknown')
-        amount = room_data.get('amount', 'Unknown')
-        
-        # Build the updated log message text
-        log_text = (
-            f"<b><u>NEW ROOM CREATED</u></b>\n\n"
-            f"<b>Buyer:</b> @{buyer_username}\n"
-            f"<b>Seller:</b> @{seller_username}\n"
-            f"<b>Token:</b> {token_name} [{blockchain}]\n"
-            f"<b>Amount:</b> {amount}\n"
-            f"<b>Room ID:</b> <code>{chat_id}</code>\n"
-            f"<b>Current Stage:</b> {status}"
-        )
-        
-        # Edit existing message
+
         msg_info = room_log_messages[chat_id]
+        if status is None:
+            status = msg_info.get('status', 'Room Assigned')
+
+        log_text = build_room_log_text(chat_id, status)
+
         await bot.edit_message_text(
             chat_id=msg_info['chat_id'],
             message_id=msg_info['msg_id'],
             text=log_text,
             parse_mode='HTML'
         )
+        msg_info['status'] = status
         logger.info(f"✅ Updated room log status for room {chat_id} - Status: {status}")
     
     except Exception as e:
@@ -6173,6 +6389,10 @@ async def handle_user_chat_member_update(update: Update, context: ContextTypes.D
 
                 # Only track/notify member changes for the designated P2P ROOM group
                 if chat.id != P2P_ROOM_GROUP_ID:
+                    # In a deal room, refresh the room log's join status
+                    if positive_chat_id in room_log_messages:
+                        mark_room_join(positive_chat_id, username, user_id)
+                        await update_room_log_status(context.bot, positive_chat_id)
                     return
 
                 # Record who added this member (for /list), when added by someone else.
@@ -6315,6 +6535,11 @@ async def handle_chat_join_request(update: Update, context: ContextTypes.DEFAULT
                     await context.bot.approve_chat_join_request(chat_id, user_id)
                     logger.info(f"✅ INSTANT APPROVED join request from @{username} to {room_name}")
                     
+                    mark_room_join(positive_chat_id, username, user_id)
+                    context.application.create_task(
+                        update_room_log_status(context.bot, positive_chat_id)
+                    )
+
                     # Keep room in waiting list until BOTH users have actually joined
                     rooms_waiting_for_requests.add(positive_chat_id)
                     logger.info(f"🔔 Room {positive_chat_id} still waiting for join completions")
@@ -6873,25 +7098,13 @@ If you need to continue this transaction, please start a new deal using /room co
                     except Exception as e:
                         logger.warning(f"Could not send auto-close notification to room {chat_id}: {e}")
                     
-                    disclaimer_sent.discard(chat_id)
-                    role_selection_sent.discard(chat_id)
-                    processed_rooms.discard(chat_id)
-                    rooms_waiting_for_requests.discard(chat_id)
-                    
-                    if chat_id in room_awaiting_hash:
-                        del room_awaiting_hash[chat_id]
-                    if chat_id in room_transaction_state:
-                        del room_transaction_state[chat_id]
-                    if chat_id in user_roles:
-                        del user_roles[chat_id]
-                    if chat_id in approvals:
-                        del approvals[chat_id]
-                    if chat_id in release_approvals:
-                        del release_approvals[chat_id]
-                    
-                    # Request userbot to delete the group
-                    write_delete_request(chat_id, room_name)
-                    logger.info(f"🗑️ Requested deletion of group {room_name} (chat_id: {chat_id})")
+                    remove_room_record(chat_id)
+                    clear_room_state(chat_id)
+
+                    # Return the room to the premade pool
+                    room_number = deal.get('room_number') or room_number_from_name(room_name)
+                    write_release_request(chat_id, room_number, room_name)
+                    logger.info(f"♻️ Requested pool release of {room_name} (chat_id: {chat_id})")
                     
                 except Exception as e:
                     logger.warning(f"Error auto-closing deal {chat_id}: {e}")
@@ -6933,6 +7146,7 @@ def main() -> None:
     application.add_handler(CommandHandler("verify", verify_command))
     application.add_handler(CommandHandler("close", close_command))
     application.add_handler(CommandHandler("resetrooms", resetrooms_command))
+    application.add_handler(CommandHandler("startroom", startroom_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("addstats", addstats_command))
     application.add_handler(CommandHandler("addadmin", addadmin_command))

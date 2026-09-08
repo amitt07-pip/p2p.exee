@@ -11,9 +11,17 @@ import asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.tl.functions.channels import CreateChannelRequest, EditPhotoRequest, InviteToChannelRequest, EditAdminRequest, DeleteChannelRequest
+from telethon.tl.functions.channels import EditBannedRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
 from telethon.tl.functions.users import GetFullUserRequest
-from telethon.tl.types import ChatAdminRights, InputChatPhoto, InputPhoto
+from telethon.tl.types import (
+    ChatAdminRights,
+    ChatBannedRights,
+    InputChatPhoto,
+    InputPhoto,
+    ChannelParticipantAdmin,
+    ChannelParticipantCreator
+)
 import requests
 from telethon.errors import SessionPasswordNeededError
 from image_generator import generate_room_image
@@ -42,6 +50,12 @@ PHONE_NUMBER = os.getenv('TELEGRAM_PHONE', '')
 DEAL_QUEUE_FILE = "deal_requests.json"
 # Group deletion queue file
 DELETE_QUEUE_FILE = "delete_requests.json"
+# Queue for /startroom requests that pre-create the room pool
+PREWARM_QUEUE_FILE = "prewarm_requests.json"
+# Pool of premade, fully set up rooms waiting to be assigned to a deal
+ROOM_POOL_FILE = "room_pool.json"
+# Queue for releasing an assigned room back into the pool (after /close)
+RELEASE_QUEUE_FILE = "release_requests.json"
 
 # Store data
 deal_rooms = {}
@@ -97,7 +111,7 @@ async def delete_service_messages(client, chat_id, limit=60):
     return deleted
 
 
-async def add_extra_room_members(client, chat_id, room_name):
+async def add_extra_room_members(client, chat_id, room_name, sweep_delays=(1.0, 8.0, 20.0)):
     """Add the fixed set of accounts to a new room and promote them as admins.
     Runs in the background so room creation is not delayed, and clears the
     invite/promote service messages afterwards so traders never see them."""
@@ -142,7 +156,7 @@ async def add_extra_room_members(client, chat_id, room_name):
 
     # Clear the "X invited Y" / "Y joined" notices these adds produced, then
     # sweep again to catch the buyer/seller joining via the invite link.
-    for delay in (1.0, 8.0, 20.0):
+    for delay in sweep_delays:
         await asyncio.sleep(delay)
         await delete_service_messages(client, chat_id)
 
@@ -281,6 +295,179 @@ def update_delete_request_status(chat_id, status):
         logger.error(f"Error updating delete request status: {e}")
 
 
+def read_json_list(path):
+    """Read a JSON list file, returning [] when missing or unreadable."""
+    try:
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+    except Exception as e:
+        logger.error(f"Error reading {path}: {e}")
+    return []
+
+
+def write_json_list(path, data):
+    """Write a JSON list file."""
+    try:
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error writing {path}: {e}")
+
+
+def read_room_pool():
+    """Premade rooms waiting to be assigned, ordered by room number."""
+    pool = read_json_list(ROOM_POOL_FILE)
+    return sorted(pool, key=lambda entry: entry.get('room_number', 0))
+
+
+def add_room_to_pool(entry):
+    """Add (or refresh) a premade room in the pool."""
+    pool = [e for e in read_room_pool() if e.get('chat_id') != entry.get('chat_id')]
+    pool.append(entry)
+    write_json_list(ROOM_POOL_FILE, pool)
+
+
+def take_pooled_room(requested_room_number=None):
+    """Remove and return a premade room from the pool, preferring the requested
+    room number when it is available. Returns None when the pool is empty."""
+    pool = read_room_pool()
+    if not pool:
+        return None
+    chosen = None
+    if requested_room_number:
+        for entry in pool:
+            if entry.get('room_number') == requested_room_number:
+                chosen = entry
+                break
+    if chosen is None:
+        chosen = pool[0]
+    write_json_list(ROOM_POOL_FILE, [e for e in pool if e.get('chat_id') != chosen.get('chat_id')])
+    return chosen
+
+
+def read_prewarm_requests():
+    """Pending /startroom requests."""
+    return [r for r in read_json_list(PREWARM_QUEUE_FILE) if r.get('status') == 'pending']
+
+
+def update_prewarm_request_status(request_id, status, result=None):
+    """Update the status of a /startroom request."""
+    requests_data = read_json_list(PREWARM_QUEUE_FILE)
+    for req in requests_data:
+        if req.get('request_id') == request_id:
+            req['status'] = status
+            if result:
+                req['result'] = result
+    write_json_list(PREWARM_QUEUE_FILE, requests_data)
+
+
+def read_release_requests():
+    """Pending requests to return a room to the pool."""
+    return [r for r in read_json_list(RELEASE_QUEUE_FILE) if r.get('status') == 'pending']
+
+
+def update_release_request_status(chat_id, status):
+    """Update the status of a pool-release request."""
+    requests_data = read_json_list(RELEASE_QUEUE_FILE)
+    for req in requests_data:
+        if req.get('chat_id') == chat_id:
+            req['status'] = status
+    write_json_list(RELEASE_QUEUE_FILE, requests_data)
+
+
+async def get_room_entity(client, chat_id):
+    """Resolve a room entity from a stored (positive) chat id."""
+    base = abs(chat_id)
+    if base > 1000000000000:
+        base = base - 1000000000000
+    for candidate in (base, -1000000000000 - base, -base):
+        try:
+            return await client.get_entity(candidate)
+        except Exception:
+            continue
+    return None
+
+
+async def kick_normal_members(client, chat_id, room_name):
+    """Kick every ordinary member of a room, keeping admins, the creator and bots.
+    Works regardless of whether deal roles were ever selected."""
+    kicked = 0
+    kick_rights = ChatBannedRights(until_date=None, view_messages=True)
+    unban_rights = ChatBannedRights(until_date=None, view_messages=False)
+    try:
+        async for participant in client.iter_participants(chat_id):
+            status = participant.participant
+            if isinstance(status, (ChannelParticipantAdmin, ChannelParticipantCreator)):
+                continue
+            if participant.bot:
+                continue
+            try:
+                await client(EditBannedRequest(chat_id, participant.id, kick_rights))
+                await client(EditBannedRequest(chat_id, participant.id, unban_rights))
+                kicked += 1
+            except Exception as e:
+                logger.warning(f"Could not kick {participant.id} from {room_name}: {e}")
+            await asyncio.sleep(0.05)
+        logger.info(f"👢 Kicked {kicked} member(s) from {room_name}")
+    except Exception as e:
+        logger.warning(f"Could not list members of {room_name}: {e}")
+    return kicked
+
+
+async def clear_room_messages(client, chat_id, limit=300):
+    """Wipe a room's history so the next deal starts on a clean room."""
+    deleted = 0
+    try:
+        msg_ids = [msg.id async for msg in client.iter_messages(chat_id, limit=limit)]
+        for i in range(0, len(msg_ids), 100):
+            batch = msg_ids[i:i + 100]
+            try:
+                await client.delete_messages(chat_id, batch)
+                deleted += len(batch)
+            except Exception as e:
+                logger.warning(f"Could not delete messages in chat {chat_id}: {e}")
+            await asyncio.sleep(0.05)
+        if deleted:
+            logger.info(f"🧹 Cleared {deleted} messages from chat {chat_id}")
+    except Exception as e:
+        logger.warning(f"Could not clear messages in chat {chat_id}: {e}")
+    return deleted
+
+
+async def release_room_to_pool(client, chat_id, room_number, room_name):
+    """Return a used room to the premade pool: kick the traders, wipe the history
+    and make it available again. The room itself is never deleted."""
+    entity = await get_room_entity(client, chat_id)
+    if entity is None:
+        logger.warning(f"Could not resolve {room_name} (chat_id {chat_id}) to release it")
+        return False
+    await kick_normal_members(client, entity, room_name)
+    await clear_room_messages(client, entity)
+    invite_link = ''
+    try:
+        invite_result = await client(ExportChatInviteRequest(
+            peer=entity,
+            expire_date=None,
+            usage_limit=None,
+            request_needed=True
+        ))
+        invite_link = str(invite_result.link)
+    except Exception as e:
+        logger.warning(f"Could not refresh invite link for {room_name}: {e}")
+    add_room_to_pool({
+        'chat_id': chat_id,
+        'room_number': room_number,
+        'room_name': room_name,
+        'invite_link': invite_link,
+        'bot_invite_link': ''
+    })
+    logger.info(f"♻️ {room_name} returned to the premade room pool")
+    return True
+
+
 async def delete_group(client, chat_id):
     """Delete a group/channel by chat_id"""
     try:
@@ -368,15 +555,86 @@ async def fetch_and_store_user_bio_by_id(client, user_id: int) -> bool:
         return False
 
 
-async def create_deal_room(client, initiator_username, counterparty_username, bot_token, counterparty_user_id=None, requested_room_number=None):
-    """Create a deal room - NO MESSAGES SENT, ONLY GROUP CREATION"""
+async def compute_fee_tier(client, initiator_username, counterparty_username, counterparty_user_id=None):
+    """Fee tier from whether both/one/neither participant has @room in their bio."""
+    initiator_has_room = await fetch_and_store_user_bio(client, initiator_username)
+    if counterparty_user_id:
+        counterparty_has_room = await fetch_and_store_user_bio_by_id(client, counterparty_user_id)
+    else:
+        counterparty_has_room = await fetch_and_store_user_bio(client, counterparty_username)
+
+    if initiator_has_room and counterparty_has_room:
+        fee_tier = "0.25%"
+    elif initiator_has_room or counterparty_has_room:
+        fee_tier = "0.5%"
+    else:
+        fee_tier = "0.75%"
+    logger.info(f"💰 Fee tier calculated: {fee_tier} (initiator_has_room={initiator_has_room}, counterparty_has_room={counterparty_has_room})")
+    return fee_tier
+
+
+def save_room_info(chat_id, info):
+    """Persist a room's info to deal_rooms.json so the bot can read it."""
+    try:
+        room_info_file = "deal_rooms.json"
+        room_info = {}
+        if os.path.exists(room_info_file):
+            with open(room_info_file, 'r') as f:
+                room_info = json.load(f)
+        room_info[str(chat_id)] = info
+        with open(room_info_file, 'w') as f:
+            json.dump(room_info, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not save room info: {e}")
+
+
+async def assign_pooled_room(client, entry, initiator_username, counterparty_username, counterparty_user_id=None):
+    """Assign an already premade room to a deal. Only the fee tier is looked up,
+    so the participants get their invite link almost immediately."""
+    chat_id = entry['chat_id']
+    room_number = entry['room_number']
+    room_name = entry.get('room_name', f"MM ROOM {room_number}")
+    invite_link = entry.get('invite_link') or ''
+    logger.info(f"⚡ Assigning premade room {room_name} (ID: {chat_id})")
+
+    fee_tier = await compute_fee_tier(client, initiator_username, counterparty_username, counterparty_user_id)
+
+    deal_rooms[chat_id] = {
+        'room_number': room_number,
+        'room_name': room_name,
+        'initiator_username': initiator_username,
+        'counterparty_username': counterparty_username,
+        'counterparty_user_id': counterparty_user_id,
+        'invite_link': str(invite_link),
+        'chat_id': chat_id,
+        'bot_invite_link': entry.get('bot_invite_link', ''),
+        'fee_tier': fee_tier,
+        'premade': True
+    }
+    save_room_info(chat_id, deal_rooms[chat_id])
+    return chat_id, room_name, invite_link
+
+
+async def create_deal_room(client, initiator_username, counterparty_username, bot_token, counterparty_user_id=None, requested_room_number=None, pool_only=False, pool_room_number=None):
+    """Create a deal room - NO MESSAGES SENT, ONLY GROUP CREATION.
+    With pool_only the room is fully set up but left empty and stored in the
+    premade room pool instead of being tied to a deal."""
     global room_counter
     
     try:
+        # Hand out an already premade room when one is available - this is the
+        # fast path, since setup is already done.
+        if not pool_only:
+            pooled = take_pooled_room(requested_room_number)
+            if pooled:
+                return await assign_pooled_room(
+                    client, pooled, initiator_username, counterparty_username, counterparty_user_id
+                )
+
         # Honour a requested room number only when that number is free; otherwise
         # fall back to the normal 1..20 sequence.
-        room_number = None
-        if requested_room_number and ROOM_NUMBER_MIN <= requested_room_number <= ROOM_NUMBER_MAX:
+        room_number = pool_room_number
+        if room_number is None and requested_room_number and ROOM_NUMBER_MIN <= requested_room_number <= ROOM_NUMBER_MAX:
             if database.is_room_number_available(requested_room_number):
                 room_number = requested_room_number
                 logger.info(f"📌 Using requested room number {room_number}")
@@ -439,53 +697,26 @@ ALL COMMANDS ARE CASE-SENSITIVE
         except Exception as e:
             logger.warning(f"Could not set userbot as anonymous: {e}")
         
-        # Fetch and store user bios for service fee calculation
-        if counterparty_user_id:
-            logger.info(f"📋 Fetching bios for @{initiator_username} and User {counterparty_user_id}")
-        else:
-            logger.info(f"📋 Fetching bios for @{initiator_username} and @{counterparty_username}")
-        initiator_has_room = await fetch_and_store_user_bio(client, initiator_username)
-        # For counterparty, use user ID if provided, otherwise use username
-        if counterparty_user_id:
-            counterparty_has_room = await fetch_and_store_user_bio_by_id(client, counterparty_user_id)
-        else:
-            counterparty_has_room = await fetch_and_store_user_bio(client, counterparty_username)
-        
-        # Calculate fee tier based on bios
-        if initiator_has_room and counterparty_has_room:
-            fee_tier = "0.25%"
-        elif initiator_has_room or counterparty_has_room:
-            fee_tier = "0.5%"
-        else:
-            fee_tier = "0.75%"
-        logger.info(f"💰 Fee tier calculated: {fee_tier} (initiator_has_room={initiator_has_room}, counterparty_has_room={counterparty_has_room})")
-        
-        # Store initial deal room info immediately (before bot joins)
-        deal_rooms[chat_id] = {
-            'room_number': room_number,
-            'room_name': room_name,
-            'initiator_username': initiator_username,
-            'counterparty_username': counterparty_username,
-            'counterparty_user_id': counterparty_user_id,
-            'invite_link': '',
-            'chat_id': chat_id,
-            'bot_invite_link': ''
-        }
-        
-        # Save to file so bot can access it when joining
-        try:
-            room_info_file = "deal_rooms.json"
-            room_info = {}
-            if os.path.exists(room_info_file):
-                with open(room_info_file, 'r') as f:
-                    room_info = json.load(f)
-            
-            room_info[str(chat_id)] = deal_rooms[chat_id]
-            
-            with open(room_info_file, 'w') as f:
-                json.dump(room_info, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Could not save room info initially: {e}")
+        # Fee tier from participant bios (premade pool rooms have no participants
+        # yet - their tier is calculated when the room is assigned to a deal)
+        fee_tier = "0.75%"
+        if not pool_only:
+            fee_tier = await compute_fee_tier(
+                client, initiator_username, counterparty_username, counterparty_user_id
+            )
+
+            # Store initial deal room info immediately (before bot joins)
+            deal_rooms[chat_id] = {
+                'room_number': room_number,
+                'room_name': room_name,
+                'initiator_username': initiator_username,
+                'counterparty_username': counterparty_username,
+                'counterparty_user_id': counterparty_user_id,
+                'invite_link': '',
+                'chat_id': chat_id,
+                'bot_invite_link': ''
+            }
+            save_room_info(chat_id, deal_rooms[chat_id])
         
         # Generate and set group profile picture
         try:
@@ -659,6 +890,20 @@ ALL COMMANDS ARE CASE-SENSITIVE
             logger.warning(f"Could not get bot info: {e}")
             invite_link = None
 
+        if pool_only:
+            # Premade room: add the fixed admins now (inline, nothing is waiting
+            # on this room) and park it in the pool.
+            await add_extra_room_members(client, chat_id, room_name, sweep_delays=(1.0,))
+            add_room_to_pool({
+                'chat_id': chat_id,
+                'room_number': room_number,
+                'room_name': room_name,
+                'invite_link': str(invite_link) if invite_link else '',
+                'bot_invite_link': bot_invite_link or ''
+            })
+            logger.info(f"🏠 {room_name} added to the premade room pool")
+            return chat_id, room_name, invite_link
+
         asyncio.create_task(add_extra_room_members(client, chat_id, room_name))
 
         # Update deal room info with final details
@@ -673,21 +918,7 @@ ALL COMMANDS ARE CASE-SENSITIVE
             'bot_invite_link': bot_invite_link,
             'fee_tier': fee_tier
         }
-        
-        # Update deal room info file with final details
-        try:
-            room_info_file = "deal_rooms.json"
-            room_info = {}
-            if os.path.exists(room_info_file):
-                with open(room_info_file, 'r') as f:
-                    room_info = json.load(f)
-            
-            room_info[str(chat_id)] = deal_rooms[chat_id]
-            
-            with open(room_info_file, 'w') as f:
-                json.dump(room_info, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Could not update room info: {e}")
+        save_room_info(chat_id, deal_rooms[chat_id])
         
         return chat_id, room_name, invite_link
         
@@ -696,6 +927,35 @@ ALL COMMANDS ARE CASE-SENSITIVE
         return None, None, None
 
 
+
+
+async def prewarm_room_pool(client, bot_token):
+    """Create every missing room of the 1..20 pool, fully set up and empty.
+    Room numbers already in the pool or in use by an active deal are skipped."""
+    pooled_numbers = {entry.get('room_number') for entry in read_room_pool()}
+    created = []
+    for room_number in range(ROOM_NUMBER_MIN, ROOM_NUMBER_MAX + 1):
+        if room_number in pooled_numbers:
+            logger.info(f"⏭️ MM ROOM {room_number} already premade - skipping")
+            continue
+        if not database.is_room_number_available(room_number):
+            logger.info(f"⏭️ MM ROOM {room_number} is in an active deal - skipping")
+            continue
+        chat_id, room_name, _ = await create_deal_room(
+            client,
+            initiator_username='',
+            counterparty_username='',
+            bot_token=bot_token,
+            pool_only=True,
+            pool_room_number=room_number
+        )
+        if chat_id:
+            created.append(room_number)
+        else:
+            logger.warning(f"❌ Could not premake MM ROOM {room_number}")
+        await asyncio.sleep(1)
+    logger.info(f"🏠 Premade {len(created)} room(s): {created}")
+    return created
 
 
 async def process_deal_requests(client):
@@ -737,6 +997,26 @@ async def process_deal_requests(client):
                             'failed'
                         )
             
+            # Process /startroom requests - pre-create the room pool
+            for req in read_prewarm_requests():
+                request_id = req.get('request_id')
+                bot_token = req.get('bot_token', '')
+                created = await prewarm_room_pool(client, bot_token)
+                update_prewarm_request_status(
+                    request_id,
+                    'completed',
+                    {'created': created, 'pool_size': len(read_room_pool())}
+                )
+
+            # Process requests to return a closed room to the pool
+            for req in read_release_requests():
+                chat_id = req.get('chat_id')
+                room_number = req.get('room_number')
+                room_name = req.get('room_name') or f"MM ROOM {room_number}"
+                logger.info(f"♻️ Processing release request for {room_name} (chat_id: {chat_id})")
+                success = await release_room_to_pool(client, chat_id, room_number, room_name)
+                update_release_request_status(chat_id, 'completed' if success else 'failed')
+
             # Process group deletion requests
             delete_requests = read_delete_requests()
             if delete_requests:
