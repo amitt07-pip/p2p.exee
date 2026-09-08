@@ -178,7 +178,12 @@ current_fee_percent = 0.0  # Global service fee (set via !setfees command, defau
 NETWORK_FEE_BSC = 0.5  # Flat network fee on BSC, in the deal's token (USDT/USDC)
 
 # Admin user IDs who can use admin commands like /setownerwallet
-ADMIN_USER_IDS = {6864194951, 7338429782, 6643621069, 7629970378, 7300655160}
+ADMIN_USER_IDS = {
+    6864194951, 7338429782, 6643621069, 7629970378, 7300655160,
+    7244135096,  # @peakybiinder89
+    8117659015,  # @asknigge
+    6564907309,  # @xdekku
+}
 
 # Premium (custom) emoji ids provided by the owner. Rendered via the HTML
 # <tg-emoji> tag; clients without access to the emoji show the fallback char.

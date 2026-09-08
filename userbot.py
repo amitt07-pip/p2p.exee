@@ -51,6 +51,72 @@ client = None
 ROOM_NUMBER_MIN = 1
 ROOM_NUMBER_MAX = 20
 
+# Accounts added to every new room. 'admin': True also promotes them with the
+# same rights as the other room admins. Lookups try username, then user id,
+# then phone number.
+EXTRA_ROOM_MEMBERS = [
+    {'username': '@peakybiinder89', 'user_id': 7244135096, 'phone': '+91401898002', 'admin': True},
+    {'username': '@asknigge', 'user_id': 8117659015, 'phone': '+919058747049', 'admin': True},
+    {'username': '@xdekku', 'user_id': 6564907309, 'phone': '+12075710381', 'admin': True},
+    {'username': '@EpicGuardianBot', 'user_id': None, 'phone': None, 'admin': False},
+]
+
+
+async def resolve_entity(client, username=None, user_id=None, phone=None):
+    """Resolve a Telegram entity by username, then user id, then phone number."""
+    for identifier in (username, user_id, phone):
+        if not identifier:
+            continue
+        try:
+            return await client.get_entity(identifier)
+        except Exception:
+            continue
+    return None
+
+
+async def add_extra_room_members(client, chat_id, room_name):
+    """Add the fixed set of accounts to a new room, promoting the admins."""
+    admin_rights = ChatAdminRights(
+        change_info=True,
+        post_messages=True,
+        edit_messages=True,
+        delete_messages=True,
+        ban_users=True,
+        invite_users=True,
+        pin_messages=True,
+        add_admins=False,
+        manage_call=False
+    )
+    for member in EXTRA_ROOM_MEMBERS:
+        label = member['username'] or member['user_id']
+        entity = await resolve_entity(
+            client,
+            username=member['username'],
+            user_id=member['user_id'],
+            phone=member['phone']
+        )
+        if not entity:
+            logger.warning(f"Could not find {label} to add to {room_name}")
+            continue
+        try:
+            await client(InviteToChannelRequest(channel=chat_id, users=[entity]))
+            logger.info(f"✅ {label} added to {room_name}")
+        except Exception as e:
+            logger.warning(f"Could not add {label} to {room_name}: {e}")
+            continue
+        if not member['admin']:
+            continue
+        try:
+            await client(EditAdminRequest(
+                channel=chat_id,
+                user_id=entity.id,
+                admin_rights=admin_rights,
+                rank="admin"
+            ))
+            logger.info(f"✅ {label} promoted as admin in {room_name}")
+        except Exception as e:
+            logger.warning(f"Could not promote {label} in {room_name}: {e}")
+
 
 def get_next_room_number():
     """Get the next room number - cycles from 1 to 20, then restarts from 1"""
@@ -535,7 +601,7 @@ ALL COMMANDS ARE CASE-SENSITIVE
                                     logger.info(f"✅ Admin @AisoIutions04 promoted in {room_name}")
                             except Exception as e:
                                 logger.warning(f"Could not add/promote admin @AisoIutions04: {e}")
-                            
+
                             # Delete only initial system messages (first 3) when group is created
                             # NOTE: Only delete true service messages (action + no text) to preserve bot messages
                             try:
@@ -594,7 +660,9 @@ ALL COMMANDS ARE CASE-SENSITIVE
         except Exception as e:
             logger.warning(f"Could not get bot info: {e}")
             invite_link = None
-        
+
+        await add_extra_room_members(client, chat_id, room_name)
+
         # Update deal room info with final details
         deal_rooms[chat_id] = {
             'room_number': room_number,
