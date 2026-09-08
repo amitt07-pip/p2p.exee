@@ -11,7 +11,7 @@ import asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.tl.functions.channels import CreateChannelRequest, EditPhotoRequest, InviteToChannelRequest, EditAdminRequest, DeleteChannelRequest
-from telethon.tl.functions.channels import EditBannedRequest
+from telethon.tl.functions.channels import EditBannedRequest, TogglePreHistoryHiddenRequest
 from telethon.tl.functions.messages import ExportChatInviteRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import (
@@ -417,6 +417,17 @@ async def kick_normal_members(client, chat_id, room_name):
     return kicked
 
 
+async def hide_room_history(client, chat_id, room_name):
+    """Hide the chat history from members who join later."""
+    try:
+        await client(TogglePreHistoryHiddenRequest(channel=chat_id, enabled=True))
+        logger.info(f"🙈 Chat history hidden for new members in {room_name}")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not hide chat history for {room_name}: {e}")
+        return False
+
+
 async def clear_room_messages(client, chat_id, limit=300):
     """Wipe a room's history so the next deal starts on a clean room."""
     deleted = 0
@@ -446,6 +457,7 @@ async def release_room_to_pool(client, chat_id, room_number, room_name):
         return False
     await kick_normal_members(client, entity, room_name)
     await clear_room_messages(client, entity)
+    await hide_room_history(client, entity, room_name)
     invite_link = ''
     try:
         invite_result = await client(ExportChatInviteRequest(
@@ -671,6 +683,8 @@ ALL COMMANDS ARE CASE-SENSITIVE
         
         chat_id = result.chats[0].id
         logger.info(f"✅ Group Created: {room_name} (ID: {chat_id})")
+
+        await hide_room_history(client, chat_id, room_name)
         
         # Make userbot anonymous in the group
         try:
