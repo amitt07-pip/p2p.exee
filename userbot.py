@@ -67,9 +67,11 @@ ROOM_NUMBER_MIN = 1
 ROOM_NUMBER_MAX = 20
 
 # Longest Telegram flood wait we sit through before giving up on a step.
-FLOOD_WAIT_LIMIT = 120
+MAX_FLOOD_SLEEP = 3600
 # Pause between premade room creations, to stay under Telegram's create limits.
 PREWARM_ROOM_DELAY = 4
+# Attempts per room while premaking the pool (a flood wait costs one attempt).
+PREWARM_ROOM_ATTEMPTS = 3
 
 # Accounts added to every new room and promoted with the same rights and
 # "admin" rank as the other room admins. Lookups try username, then user id,
@@ -443,7 +445,7 @@ async def set_room_photo(client, chat_id, room_number, room_name, attempts=3):
                 logger.info(f"✅ Profile picture set for {room_name}")
                 return True
             except FloodWaitError as e:
-                if e.seconds > FLOOD_WAIT_LIMIT or attempt == attempts:
+                if e.seconds > MAX_FLOOD_SLEEP or attempt == attempts:
                     logger.warning(f"Flood wait {e.seconds}s setting picture for {room_name}")
                     return False
                 logger.info(f"⏳ Waiting {e.seconds}s before retrying picture for {room_name}")
@@ -1015,7 +1017,8 @@ ALL COMMANDS ARE CASE-SENSITIVE
 async def prewarm_room_pool(client, bot_token):
     """Create every missing room of the 1..20 pool, fully set up and empty.
     Room numbers already in the pool or in use by an active deal are skipped, so
-    re-running /startroom resumes where a previous run stopped. Rooms that lost
+    re-running /startroom resumes where a previous run stopped. Flood limits are
+    waited out and the run always continues through room 20; rooms that lost
     their picture to a flood limit get it back."""
     created = []
     failed = []
@@ -1029,26 +1032,28 @@ async def prewarm_room_pool(client, bot_token):
             logger.info(f"⏭️ MM ROOM {room_number} is in an active deal - skipping")
             continue
 
-        try:
-            chat_id, room_name, _ = await create_deal_room(
-                client,
-                initiator_username='',
-                counterparty_username='',
-                bot_token=bot_token,
-                pool_only=True,
-                pool_room_number=room_number
-            )
-        except FloodWaitError as e:
-            if e.seconds <= FLOOD_WAIT_LIMIT:
-                logger.info(f"⏳ Flood wait {e.seconds}s - pausing before MM ROOM {room_number}")
-                await asyncio.sleep(e.seconds + 1)
-                continue
-            flood_wait = e.seconds
-            logger.warning(
-                f"🛑 Telegram flood limit hit at MM ROOM {room_number} "
-                f"({e.seconds}s) - stopping, re-run /startroom later to resume"
-            )
-            break
+        chat_id = None
+        for attempt in range(1, PREWARM_ROOM_ATTEMPTS + 1):
+            try:
+                chat_id, room_name, _ = await create_deal_room(
+                    client,
+                    initiator_username='',
+                    counterparty_username='',
+                    bot_token=bot_token,
+                    pool_only=True,
+                    pool_room_number=room_number
+                )
+                break
+            except FloodWaitError as e:
+                # Wait the limit out and retry the same room, then carry on with
+                # the remaining rooms either way - the pool run never stops early.
+                flood_wait = max(flood_wait, e.seconds)
+                sleep_for = min(e.seconds, MAX_FLOOD_SLEEP) + 2
+                logger.warning(
+                    f"⏳ Flood wait {e.seconds}s on MM ROOM {room_number} "
+                    f"(try {attempt}/{PREWARM_ROOM_ATTEMPTS}) - sleeping {sleep_for}s"
+                )
+                await asyncio.sleep(sleep_for)
 
         if chat_id:
             created.append(room_number)

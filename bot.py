@@ -876,7 +876,7 @@ async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Creating 20 rooms takes a while - report progress as they appear.
     last_reported = pool_size
-    for _ in range(900):
+    for _ in range(5400):
         await asyncio.sleep(2)
         result = get_prewarm_result(request_id)
         current = len(read_room_pool())
@@ -904,11 +904,9 @@ async def startroom_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if failed:
                 text += f"\nFailed: {', '.join(str(n) for n in failed)}"
             if flood_wait:
-                minutes = max(1, flood_wait // 60)
-                text += (
-                    f"\n\n⚠️ Telegram rate limit hit — stopped early. "
-                    f"Run /startroom again in ~{minutes} min to make the rest."
-                )
+                text += "\n\n⚠️ Telegram rate-limited some rooms (waited them out)."
+            if failed:
+                text += "\nRun /startroom again to retry the failed ones."
             await status_msg.edit_text(text, parse_mode='HTML')
             return
 
