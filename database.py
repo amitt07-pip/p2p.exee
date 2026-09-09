@@ -362,6 +362,31 @@ def create_deal(chat_id: int, room_name: str = None, room_number: int = None) ->
             ON CONFLICT (chat_id) DO UPDATE SET
                 room_name = COALESCE(EXCLUDED.room_name, deals.room_name),
                 room_number = COALESCE(EXCLUDED.room_number, deals.room_number),
+                deal_token = EXCLUDED.deal_token,
+                deal_status = EXCLUDED.deal_status,
+                buyer_username = NULL,
+                seller_username = NULL,
+                buyer_user_id = NULL,
+                seller_user_id = NULL,
+                amount = NULL,
+                rate = NULL,
+                payment_method = NULL,
+                coin = NULL,
+                buyer_address = NULL,
+                seller_address = NULL,
+                escrow_address = NULL,
+                tx_hash = NULL,
+                deposit_amount = NULL,
+                fixed_wallet_role = NULL,
+                trade_id = NULL,
+                buyer_approved = FALSE,
+                seller_approved = FALSE,
+                buyer_release_approved = FALSE,
+                seller_release_approved = FALSE,
+                confirmed_at = NULL,
+                deposit_at = NULL,
+                completed_at = NULL,
+                created_at = EXCLUDED.created_at,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING deal_token
         """, (chat_id, deal_token, room_name, room_number, DEAL_STATUS_PENDING, datetime.now()))
@@ -727,7 +752,9 @@ def get_deal_summary(chat_id: int) -> Optional[Dict[str, Any]]:
 
 
 def get_expired_deals(hours: int = 12) -> List[Dict[str, Any]]:
-    """Get all deals that have been running for more than specified hours"""
+    """Deals with no activity at all for more than the given hours. Deals holding
+    a deposit are never expired, so an ongoing trade is not closed under the
+    traders."""
     try:
         conn = get_db_connection()
         if not conn:
@@ -736,10 +763,13 @@ def get_expired_deals(hours: int = 12) -> List[Dict[str, Any]]:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("""
             SELECT * FROM deals 
-            WHERE deal_status NOT IN (%s, %s, %s)
-            AND created_at < NOW() - INTERVAL '%s hours'
+            WHERE deal_status NOT IN (%s, %s, %s, %s, %s)
+            AND COALESCE(updated_at, created_at) < NOW() - (%s || ' hours')::interval
             ORDER BY created_at ASC
-        """, (DEAL_STATUS_COMPLETED, DEAL_STATUS_CANCELLED, DEAL_STATUS_EXPIRED, hours))
+        """, (
+            DEAL_STATUS_COMPLETED, DEAL_STATUS_CANCELLED, DEAL_STATUS_EXPIRED,
+            DEAL_STATUS_DEPOSIT_RECEIVED, DEAL_STATUS_RELEASE_PENDING, str(hours)
+        ))
         
         rows = cur.fetchall()
         cur.close()
