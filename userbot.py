@@ -584,6 +584,12 @@ def add_room_to_pool(entry):
     write_json_list(ROOM_POOL_FILE, pool)
 
 
+def remove_room_from_pool(chat_id):
+    """Drop a premade room from the pool, e.g. when its setup is incomplete."""
+    pool = [e for e in read_room_pool() if e.get('chat_id') != chat_id]
+    write_json_list(ROOM_POOL_FILE, pool)
+
+
 def take_pooled_room(requested_room_number=None):
     """Remove and return a premade room from the pool, preferring the requested
     room number when it is available. Returns None when the pool is empty."""
@@ -767,6 +773,81 @@ async def make_self_anonymous(client, chat_id, room_name):
             logger.warning(f"Could not set userbot as anonymous in {room_name}: {e}")
             return False
     return False
+
+
+async def missing_room_admins(client, chat_id, room_name, bot_entity=None):
+    """Labels of the accounts that should be admins of a room but are not - the
+    bot plus every fixed admin and extra member account."""
+    expected = {}
+    if bot_entity is not None:
+        expected[bot_entity.id] = 'bot'
+    for account in FIXED_ROOM_ADMINS + EXTRA_ROOM_MEMBERS:
+        entity = await resolve_entity(
+            client,
+            username=account.get('username'),
+            user_id=account.get('user_id'),
+            phone=account.get('phone')
+        )
+        label = str(account.get('username') or account.get('user_id') or account.get('phone'))
+        if entity is None:
+            logger.warning(f"Could not resolve {label} while checking {room_name}")
+            continue
+        expected[entity.id] = label
+
+    if not expected:
+        return []
+
+    admin_ids = set()
+    try:
+        async for participant in client.iter_participants(chat_id):
+            if isinstance(
+                participant.participant,
+                (ChannelParticipantAdmin, ChannelParticipantCreator)
+            ):
+                admin_ids.add(participant.id)
+    except Exception as e:
+        logger.warning(f"Could not list the admins of {room_name}: {e}")
+        return []
+
+    return [label for user_id, label in expected.items() if user_id not in admin_ids]
+
+
+async def drop_incomplete_pool_rooms(client, bot_token, request_id=None):
+    """Remove premade rooms that are missing any required admin from the pool, so
+    /startroom builds a fresh room for that number instead of handing out a
+    half-set-up one."""
+    dropped = []
+    for entry in read_room_pool():
+        if request_id and is_prewarm_cancelled(request_id):
+            break
+        chat_id = entry.get('chat_id')
+        room_number = entry.get('room_number')
+        room_name = entry.get('room_name', f'MM ROOM {room_number}')
+        if not chat_id or not room_number:
+            continue
+        room_client = client_by_label(entry.get('account') or '') or client
+        entity = await get_room_entity(room_client, chat_id)
+        if entity is None:
+            logger.warning(f"{room_name} is unreachable - dropping it from the pool")
+            remove_room_from_pool(chat_id)
+            dropped.append(room_number)
+            continue
+
+        bot_entity = await resolve_bot_entity(room_client, bot_token)
+        missing = await missing_room_admins(room_client, entity, room_name, bot_entity)
+        if not missing:
+            continue
+
+        logger.warning(f"{room_name} is missing admin(s) {missing} - rebuilding it")
+        remove_room_from_pool(chat_id)
+        dropped.append(room_number)
+        try:
+            await delete_group(room_client, chat_id)
+        except Exception as e:
+            logger.warning(f"Could not delete the incomplete {room_name}: {e}")
+    if dropped:
+        logger.info(f"🧹 Rebuilding room(s) with incomplete admins: {dropped}")
+    return dropped
 
 
 async def repair_pool_rooms(client, bot_token, request_id=None):
@@ -1267,6 +1348,11 @@ async def prewarm_room_pool(client, bot_token, request_id=None):
     error = None
     cancelled = False
     attempts = {}
+
+    # A premade room missing any required admin is thrown away first, so its
+    # number is rebuilt from scratch below instead of being handed to a trader.
+    rebuilt = await drop_incomplete_pool_rooms(client, bot_token, request_id)
+
     room_numbers = list(range(ROOM_NUMBER_MIN, ROOM_NUMBER_MAX + 1))
     for room_number in room_numbers:
         attempts[room_number] = attempts.get(room_number, 0) + 1
@@ -1339,7 +1425,8 @@ async def prewarm_room_pool(client, bot_token, request_id=None):
         'created': created,
         'error': error,
         'cancelled': cancelled,
-        'repaired': repaired
+        'repaired': repaired,
+        'rebuilt': rebuilt
     }
 
 

@@ -940,6 +940,7 @@ async def report_prewarm_progress(status_msg, request_id, pool_size, cancel_mark
             created = result.get('created', [])
             error = result.get('error')
             repaired = result.get('repaired', [])
+            rebuilt = result.get('rebuilt', [])
             available = result.get('pool_size', current)
             if result.get('cancelled'):
                 header = "🛑 <b>Room preparation cancelled</b>"
@@ -952,6 +953,8 @@ async def report_prewarm_progress(status_msg, request_id, pool_size, cancel_mark
                 f"Newly created: {len(created)}\n"
                 f"Premade rooms available: {available}"
             )
+            if rebuilt:
+                text += f"\nRebuilt (missing admins): {', '.join(str(n) for n in rebuilt)}"
             if repaired:
                 text += f"\nSetup completed for: {', '.join(str(n) for n in repaired)}"
             if error:
