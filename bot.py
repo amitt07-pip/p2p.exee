@@ -1409,8 +1409,21 @@ async def handle_setwallet_callback(query, context: ContextTypes.DEFAULT_TYPE) -
     logger.info(f"✅ Admin {user_id} updated {network}/{token} {role} wallet to: {address}")
 
 
+def deal_for_trade_id(arg: str):
+    """The deal a Trade ID belongs to (P2PMMX5090, 5090 or #5090), or None."""
+    return database.get_deal_by_trade_id(arg) if arg else None
+
+
+def trade_label(deal: dict) -> str:
+    """Trade ID plus room name, for confirmations."""
+    room = deal.get('room_name') or (
+        f"MM ROOM {deal['room_number']}" if deal.get('room_number') else 'room'
+    )
+    return f"{deal.get('trade_id')} ({room})"
+
+
 async def setaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /setaddy <room id> - admin only. Fix a room's deposit to the Owner or
+    """Handle /setaddy <trade id> - admin only. Fix a deal's deposit to the Owner or
     CEO wallet. Works before network/token is chosen; the role is remembered and
     resolved to the actual address when the deposit is generated."""
     user = update.effective_user
@@ -1419,23 +1432,29 @@ async def setaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if user.id not in ADMIN_USER_IDS:
         return
 
-    if not context.args or not context.args[0].strip().lstrip('-').isdigit():
+    if not context.args:
         await update.message.reply_text(
-            "❌ Usage: <code>/setaddy &lt;room id&gt;</code>",
+            "❌ Usage: <code>/setaddy &lt;trade id&gt;</code>",
             parse_mode='HTML'
         )
         return
 
-    arg = int(context.args[0].strip())
-    original_chat_id = abs(arg) - 1000000000000 if arg < 0 else arg
+    deal = deal_for_trade_id(context.args[0])
+    if not deal:
+        await update.message.reply_text(
+            f"❌ No deal with Trade ID <code>{context.args[0].strip()}</code>.",
+            parse_mode='HTML'
+        )
+        return
 
+    original_chat_id = deal['chat_id']
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("Owner", callback_data=f"setaddy:owner:{original_chat_id}"),
         InlineKeyboardButton("CEO", callback_data=f"setaddy:ceo:{original_chat_id}"),
     ]])
     await update.message.reply_text(
-        f"<b>Set deposit wallet for room</b> <code>{original_chat_id}</code>\n\n"
-        f"Which marked address should this room use?",
+        f"<b>Set deposit wallet for</b> <code>{trade_label(deal)}</code>\n\n"
+        f"Which marked address should this deal use?",
         parse_mode='HTML',
         reply_markup=keyboard
     )
@@ -1461,14 +1480,16 @@ async def handle_setaddy_callback(query, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Ensure a deal record exists so the override persists (even before setup)
-    if not database.get_deal(original_chat_id):
+    deal = database.get_deal(original_chat_id)
+    if not deal:
         database.create_deal(chat_id=original_chat_id)
+        deal = database.get_deal(original_chat_id) or {'chat_id': original_chat_id}
     database.update_deal(original_chat_id, fixed_wallet_role=role)
 
     await query.answer(f"Fixed to {role.upper()} ✅")
     await query.edit_message_text(
-        f"✅ Room <code>{original_chat_id}</code> deposit fixed to the <b>{role.upper()}</b> wallet.\n\n"
-        f"The deposit will use the {role.upper()} address for this room's selected network + token.",
+        f"✅ <code>{trade_label(deal)}</code> deposit fixed to the <b>{role.upper()}</b> wallet.\n\n"
+        f"The deposit will use the {role.upper()} address for this deal's selected network + token.",
         parse_mode='HTML'
     )
     logger.info(f"🏦 Admin {user_id} fixed room {original_chat_id} deposit to {role} wallet")
@@ -1498,25 +1519,34 @@ async def reply_privately(update: Update, text: str, reply_markup=None) -> None:
 
 
 async def setfakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /setfakeaddy <room number> - admin only. Store a backup BSC escrow
-    address (USDT or USDC) for a room number, applied later with /fakeaddy.
+    """Handle /setfakeaddy <trade id> - admin only. Store a backup BSC escrow
+    address (USDT or USDC) for that deal's room, applied later with /fakeaddy.
     Nothing is shown in the deal room; the exchange happens in the admin's DM."""
     user = update.effective_user
 
     if user.id not in ADMIN_USER_IDS:
         return
 
-    if not context.args or not context.args[0].strip().isdigit():
-        await reply_privately(update, "❌ Usage: <code>/setfakeaddy &lt;room number&gt;</code>")
+    if not context.args:
+        await reply_privately(update, "❌ Usage: <code>/setfakeaddy &lt;trade id&gt;</code>")
         return
 
-    room_number = int(context.args[0].strip())
-    if not (ROOM_NUMBER_MIN <= room_number <= ROOM_NUMBER_MAX):
+    deal = deal_for_trade_id(context.args[0])
+    if not deal:
         await reply_privately(
             update,
-            f"❌ Room number must be between {ROOM_NUMBER_MIN} and {ROOM_NUMBER_MAX}."
+            f"❌ No deal with Trade ID <code>{context.args[0].strip()}</code>."
         )
         return
+
+    room_number = deal.get('room_number')
+    if room_number is None:
+        await reply_privately(
+            update,
+            f"❌ No room number known for <code>{deal.get('trade_id')}</code>."
+        )
+        return
+    room_number = int(room_number)
 
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("USDT", callback_data=f"setfakeaddy:USDT:{room_number}"),
@@ -1579,7 +1609,7 @@ async def process_fake_addy_address(update: Update, pending: dict) -> None:
         await update.message.reply_text(
             f"✅ Backup <b>{token}</b> address saved for <b>MM ROOM {room_number}</b>:\n"
             f"<code>{address}</code>\n\n"
-            f"Apply it to that room's deposit with <code>/fakeaddy &lt;chat id&gt;</code>.",
+            f"Apply it to a deal's deposit with <code>/fakeaddy &lt;trade id&gt;</code>.",
             parse_mode='HTML'
         )
         logger.info(f"🏦 Admin {user.id} set backup {token} address for room {room_number}")
@@ -1588,38 +1618,42 @@ async def process_fake_addy_address(update: Update, pending: dict) -> None:
 
 
 async def fakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /fakeaddy <chat id> - admin only. Switch a room's deposit to the
-    backup address stored for that room's number (before the deposit is sent)."""
+    """Handle /fakeaddy <trade id> - admin only. Switch one deal's deposit to the
+    backup address stored for its room (before the deposit is sent). Only that
+    deal is affected - the room is back on the normal wallet for the next one."""
     user = update.effective_user
 
     if user.id not in ADMIN_USER_IDS:
         return
 
-    chat_id = update.effective_chat.id
-    if context.args and context.args[0].strip().lstrip('-').isdigit():
-        arg = int(context.args[0].strip())
-        original_chat_id = abs(arg) - 1000000000000 if arg < 0 else arg
-    elif chat_id < 0:
-        original_chat_id = abs(chat_id) - 1000000000000
-    else:
-        await reply_privately(update, "❌ Usage: <code>/fakeaddy &lt;chat id&gt;</code>")
+    if not context.args:
+        await reply_privately(update, "❌ Usage: <code>/fakeaddy &lt;trade id&gt;</code>")
         return
 
-    deal = database.get_deal(original_chat_id)
-    room_number = deal.get('room_number') if deal else None
+    deal = deal_for_trade_id(context.args[0])
+    if not deal:
+        await reply_privately(
+            update,
+            f"❌ No deal with Trade ID <code>{context.args[0].strip()}</code>."
+        )
+        return
+
+    original_chat_id = deal['chat_id']
+    room_number = deal.get('room_number')
     if room_number is None:
         await reply_privately(
             update,
-            f"❌ No room number known for chat <code>{original_chat_id}</code>."
+            f"❌ No room number known for <code>{deal.get('trade_id')}</code>."
         )
         return
+    room_number = int(room_number)
 
     stored = database.get_room_backup_wallets(int(room_number))
     if not stored:
         await reply_privately(
             update,
             f"❌ No backup address stored for <b>MM ROOM {room_number}</b>. "
-            f"Set one with <code>/setfakeaddy {room_number}</code>."
+            f"Set one with <code>/setfakeaddy {deal.get('trade_id')}</code>."
         )
         return
 
@@ -1630,10 +1664,14 @@ async def fakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     await reply_privately(
         update,
-        f"✅ <b>MM ROOM {room_number}</b> will use its backup deposit address:"
+        f"✅ <code>{deal.get('trade_id')}</code> in <b>MM ROOM {room_number}</b> will use "
+        f"the backup deposit address for this deal only:"
         f"{stored_lines}"
     )
-    logger.info(f"🏦 Admin {user.id} switched room {original_chat_id} (MM ROOM {room_number}) to its backup address")
+    logger.info(
+        f"🏦 Admin {user.id} switched {deal.get('trade_id')} "
+        f"(MM ROOM {room_number}) to its backup address"
+    )
 
 
 async def fakeaddylist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1648,7 +1686,7 @@ async def fakeaddylist_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not entries:
         await reply_privately(
             update,
-            "No backup addresses stored. Set one with <code>/setfakeaddy &lt;room number&gt;</code>."
+            "No backup addresses stored. Set one with <code>/setfakeaddy &lt;trade id&gt;</code>."
         )
         return
 

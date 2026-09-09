@@ -517,6 +517,31 @@ def assign_trade_id(chat_id: int) -> Optional[str]:
         return None
 
 
+def get_deal_by_trade_id(trade_id: str) -> Optional[Dict[str, Any]]:
+    """Get a deal by its Trade ID, with or without the prefix (P2PMMX5090 or
+    5090) and in any case."""
+    if not trade_id:
+        return None
+    wanted = trade_id.strip().upper()
+    if not wanted.startswith(TRADE_ID_PREFIX):
+        wanted = f"{TRADE_ID_PREFIX}{wanted.lstrip('#')}"
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return None
+
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("SELECT * FROM deals WHERE UPPER(trade_id) = %s", (wanted,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        return dict(row) if row else None
+    except Exception as e:
+        logger.warning(f"Could not get deal by trade id: {e}")
+        return None
+
+
 def set_roles(chat_id: int, buyer_username: str, seller_username: str,
               buyer_user_id: int = None, seller_user_id: int = None) -> bool:
     """Set buyer and seller roles for a deal"""
