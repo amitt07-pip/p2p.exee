@@ -159,6 +159,7 @@ def init_database():
             ("buyer_release_approved", "BOOLEAN DEFAULT FALSE"),
             ("seller_release_approved", "BOOLEAN DEFAULT FALSE"),
             ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("amount_at", "TIMESTAMP"),
             ("confirmed_at", "TIMESTAMP"),
             ("deposit_at", "TIMESTAMP"),
             ("completed_at", "TIMESTAMP"),
@@ -383,6 +384,7 @@ def create_deal(chat_id: int, room_name: str = None, room_number: int = None) ->
                 seller_approved = FALSE,
                 buyer_release_approved = FALSE,
                 seller_release_approved = FALSE,
+                amount_at = NULL,
                 confirmed_at = NULL,
                 deposit_at = NULL,
                 completed_at = NULL,
@@ -458,7 +460,7 @@ def update_deal(chat_id: int, **kwargs) -> bool:
             'buyer_address', 'seller_address', 'escrow_address', 'tx_hash',
             'deal_status', 'buyer_approved', 'seller_approved',
             'buyer_release_approved', 'seller_release_approved',
-            'confirmed_at', 'deposit_at', 'completed_at',
+            'amount_at', 'confirmed_at', 'deposit_at', 'completed_at',
             'room_name', 'room_number', 'fixed_wallet_role', 'deposit_amount'
         }
         
@@ -556,8 +558,8 @@ def set_roles(chat_id: int, buyer_username: str, seller_username: str,
 
 
 def set_amount(chat_id: int, amount: float) -> bool:
-    """Set the deal amount"""
-    return update_deal(chat_id, amount=amount)
+    """Set the deal amount. The time it was entered starts the deal clock."""
+    return update_deal(chat_id, amount=amount, amount_at=datetime.now())
 
 
 def set_rate(chat_id: int, rate: float) -> bool:
@@ -728,6 +730,7 @@ def reset_deal(chat_id: int) -> bool:
                 seller_approved = FALSE,
                 buyer_release_approved = FALSE,
                 seller_release_approved = FALSE,
+                amount_at = NULL,
                 confirmed_at = NULL,
                 deposit_at = NULL,
                 completed_at = NULL,

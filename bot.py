@@ -987,20 +987,16 @@ async def kick_member(bot, chat_id: int, user_id: int) -> None:
 
 
 def format_deal_duration(started_at) -> str:
-    """How long a deal took, as '28 mins' / '2 hours 5 mins'."""
+    """Whole minutes between the amount being entered and now, as '28 mins'."""
     if not started_at:
-        return "N/A"
+        return "0 mins"
     try:
         started = started_at if isinstance(started_at, datetime) else datetime.fromisoformat(str(started_at))
         seconds = (datetime.now(started.tzinfo) - started).total_seconds()
     except Exception:
-        return "N/A"
+        return "0 mins"
     minutes = max(0, int(seconds // 60))
-    if minutes < 60:
-        return f"{minutes} min" if minutes == 1 else f"{minutes} mins"
-    hours, minutes = divmod(minutes, 60)
-    hour_part = f"{hours} hour" if hours == 1 else f"{hours} hours"
-    return hour_part if minutes == 0 else f"{hour_part} {minutes} mins"
+    return f"{minutes} min" if minutes == 1 else f"{minutes} mins"
 
 
 _background_tasks = set()
@@ -3855,11 +3851,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             else:  # BSC
                 tx_url = f"https://bscscan.com/address/{buyer_addr}"
             
-            duration = format_deal_duration(deal_data.get('created_at') if deal_data else None)
-            if duration == "N/A" and original_chat_id in room_creation_times:
-                duration = format_deal_duration(
-                    datetime.fromtimestamp(room_creation_times[original_chat_id])
-                )
+            # The clock runs from the amount being entered to this release.
+            duration = format_deal_duration(deal_data.get('amount_at') if deal_data else None)
             schedule_task(send_deal_complete_message(context.bot, original_chat_id, tx_url, duration))
             
             amount = 0.0
