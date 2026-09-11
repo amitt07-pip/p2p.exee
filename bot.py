@@ -1162,11 +1162,11 @@ async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     release_approvals[original_chat_id] = {'seller': 'waiting'}
     
     # Create release confirmation message - seller only
-    release_text = f"""<b>Release Confirmation (Full)</b>
+    release_text = f"""<b>RELEASE CONFIRMATION (Partial)</b>
 
-⌛️ @{seller_username} - Waiting...
+⌛️ @{seller_username} - Waiting for confirmation...
 
-Only the seller needs to approve to release payment."""
+⚠️ Seller, please confirm you want to return these funds to the Buyer."""
     
     # Create buttons
     keyboard = [
@@ -3753,9 +3753,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             database.approve_release(original_chat_id, 'seller')
             
             # Step 1: Edit message to show seller confirmed
-            confirmed_text = f"""<b>Release Confirmation</b>
+            confirmed_text = f"""<b>RELEASE CONFIRMATION (Partial)</b>
 
 ✅ @{seller_username} - Confirmed
+✅ @{buyer_username} - Confirmed
 
 ✅ All approvals received. Processing release..."""
             
