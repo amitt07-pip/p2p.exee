@@ -1003,7 +1003,22 @@ def format_deal_duration(started_at) -> str:
     return hour_part if minutes == 0 else f"{hour_part} {minutes} mins"
 
 
-async def send_deal_complete_message(bot, original_chat_id: int, tx_url: str, duration: str, delay: float = 5.0):
+_background_tasks = set()
+
+
+def schedule_task(coro):
+    """Run a coroutine in the background, keeping a reference so it is not
+    garbage collected mid-flight, and logging anything it raises."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(
+        lambda t: t.cancelled() or t.exception() and logger.warning(f"Background task failed: {t.exception()}")
+    )
+    return task
+
+
+async def send_deal_complete_message(bot, original_chat_id: int, tx_url: str, duration: str, delay: float = 3.0):
     """The closing 'Deal Complete!' card, sent a few seconds after the release."""
     await asyncio.sleep(delay)
     send_chat_id = -1000000000000 - original_chat_id
@@ -3827,30 +3842,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 except Exception as e:
                     logger.warning(f"Could not edit release confirmation: {e}")
             
-            # Step 2: send the Deal Complete card a few seconds later
-            buyer_addr = buyer_addresses.get(original_chat_id, "0xUnknown")
-            
-            amount = float(deal_data.get('amount', 0)) if deal_data else 0
-            coin = deal_data.get('coin', 'USDT') if deal_data else 'USDT'
-            chain = deal_data.get('network', 'BSC') if deal_data else user_blockchain.get(original_chat_id, 'BSC')
-            
-            # Fallback to in-memory if no DB data
-            if amount == 0:
-                for uid, amt in user_amounts.items():
-                    amount = float(amt)
-                    break
-            if not coin or coin == 'USDT':
-                coin = user_coins.get(original_chat_id, 'USDT')
-            
+            # Step 2: send the Deal Complete card a few seconds later. Scheduled
+            # before anything that can raise, so the card always goes out.
+            buyer_addr = (
+                buyer_addresses.get(original_chat_id)
+                or (deal_data.get('buyer_address') if deal_data else None)
+                or "0xUnknown"
+            )
+            chain = (deal_data.get('network') if deal_data else None) or user_blockchain.get(original_chat_id, 'BSC')
             if chain == 'TRON':
                 tx_url = f"https://tronscan.org/#/address/{buyer_addr}"
             else:  # BSC
                 tx_url = f"https://bscscan.com/address/{buyer_addr}"
             
             duration = format_deal_duration(deal_data.get('created_at') if deal_data else None)
-            asyncio.create_task(
-                send_deal_complete_message(context.bot, original_chat_id, tx_url, duration)
-            )
+            schedule_task(send_deal_complete_message(context.bot, original_chat_id, tx_url, duration))
+            
+            amount = 0.0
+            try:
+                amount = float(deal_data.get('amount') or 0) if deal_data else 0.0
+            except (TypeError, ValueError):
+                amount = 0.0
+            coin = (deal_data.get('coin') if deal_data else None) or user_coins.get(original_chat_id, 'USDT')
             
             # Mark deal as completed in database
             database.complete_deal(original_chat_id)
