@@ -15,6 +15,7 @@ import requests
 import psycopg2
 import warnings
 import secrets
+from datetime import datetime
 from psycopg2.extras import Json
 from dotenv import load_dotenv
 import database
@@ -983,6 +984,58 @@ async def kick_member(bot, chat_id: int, user_id: int) -> None:
         await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
     except Exception as e:
         logger.warning(f"Could not lift the ban on {user_id} in {chat_id}: {e}")
+
+
+def format_deal_duration(started_at) -> str:
+    """How long a deal took, as '28 mins' / '2 hours 5 mins'."""
+    if not started_at:
+        return "N/A"
+    try:
+        started = started_at if isinstance(started_at, datetime) else datetime.fromisoformat(str(started_at))
+        seconds = (datetime.now(started.tzinfo) - started).total_seconds()
+    except Exception:
+        return "N/A"
+    minutes = max(0, int(seconds // 60))
+    if minutes < 60:
+        return f"{minutes} min" if minutes == 1 else f"{minutes} mins"
+    hours, minutes = divmod(minutes, 60)
+    hour_part = f"{hours} hour" if hours == 1 else f"{hours} hours"
+    return hour_part if minutes == 0 else f"{hour_part} {minutes} mins"
+
+
+async def send_deal_complete_message(bot, original_chat_id: int, tx_url: str, duration: str, delay: float = 5.0):
+    """The closing 'Deal Complete!' card, sent a few seconds after the release."""
+    await asyncio.sleep(delay)
+    send_chat_id = -1000000000000 - original_chat_id
+    text = (
+        "🎉 <b>Deal Complete!</b> ✅\n\n"
+        f"⏱️ <b>Time Taken:</b> {duration}\n"
+        f"🔗 <b>Release TX Link:</b> <a href=\"{tx_url}\">Click Here</a>\n\n"
+        "Thank you for using our safe escrow system."
+    )
+    reply_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌  Close", callback_data=f"close_deal_{original_chat_id}")]]
+    )
+    image_path = os.path.join(SCRIPT_DIR, "deal_completed_image.jpg")
+    try:
+        if os.path.exists(image_path):
+            await bot.send_photo(
+                chat_id=send_chat_id,
+                photo=open(image_path, 'rb'),
+                caption=text,
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+        else:
+            await bot.send_message(
+                chat_id=send_chat_id,
+                text=text,
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+        logger.info(f"✅ Sent Deal Complete message to room {original_chat_id}")
+    except Exception as e:
+        logger.warning(f"Could not send Deal Complete message: {e}")
 
 
 async def wait_for_deal_result(application, initiator_username):
@@ -3774,10 +3827,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 except Exception as e:
                     logger.warning(f"Could not edit release confirmation: {e}")
             
-            # Step 2: Calculate fees and send Partial Release Complete message
+            # Step 2: send the Deal Complete card a few seconds later
             buyer_addr = buyer_addresses.get(original_chat_id, "0xUnknown")
             
-            # Get deal data for calculations
             amount = float(deal_data.get('amount', 0)) if deal_data else 0
             coin = deal_data.get('coin', 'USDT') if deal_data else 'USDT'
             chain = deal_data.get('network', 'BSC') if deal_data else user_blockchain.get(original_chat_id, 'BSC')
@@ -3790,43 +3842,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if not coin or coin == 'USDT':
                 coin = user_coins.get(original_chat_id, 'USDT')
             
-            # Calculate network fee based on chain
-            if chain == 'TRON':
-                network_fee = 3.0
-            else:  # BSC
-                network_fee = NETWORK_FEE_BSC
-            
-            # Use global service fee set via !setfees
-            service_fee_percent = current_fee_percent
-            
-            service_fee_amount = amount * (service_fee_percent / 100)
-            
-            # Calculate amount released
-            amount_released = amount - network_fee - service_fee_amount
-            
-            # Build transaction link based on chain
             if chain == 'TRON':
                 tx_url = f"https://tronscan.org/#/address/{buyer_addr}"
             else:  # BSC
                 tx_url = f"https://bscscan.com/address/{buyer_addr}"
             
-            # Format the Partial Release Complete message
-            partial_release_text = f"""✅ <b>Partial Release Complete!</b>
-
-Amount Released: {amount_released:.4f} {coin}
-Remaining: {network_fee:.4f} {coin}
-🔗 Transaction: <a href="{tx_url}">Click Here</a>"""
-            
-            # Send the Partial Release Complete message (text only, no image or button)
-            try:
-                await context.bot.send_message(
-                    chat_id=send_chat_id,
-                    text=partial_release_text,
-                    parse_mode='HTML'
-                )
-                logger.info(f"✅ Sent Partial Release Complete message to room {original_chat_id}")
-            except Exception as e:
-                logger.warning(f"Could not send Partial Release Complete message: {e}")
+            duration = format_deal_duration(deal_data.get('created_at') if deal_data else None)
+            asyncio.create_task(
+                send_deal_complete_message(context.bot, original_chat_id, tx_url, duration)
+            )
             
             # Mark deal as completed in database
             database.complete_deal(original_chat_id)
@@ -3919,6 +3943,16 @@ Remaining: {network_fee:.4f} {coin}
                             logger.warning(f"⚠️ No user ID found for seller {seller_username}")
                     except Exception as e:
                         logger.warning(f"Could not kick seller: {e}")
+                
+                # Mark the deal completed and hand the room back to the pool
+                deal = database.get_deal(chat_id)
+                database.complete_deal(chat_id)
+                await update_room_log_status(context.bot, chat_id, "Deal Completed!")
+                room_name = (deal.get('room_name') if deal else None) or f"Room {chat_id}"
+                room_number = (deal.get('room_number') if deal else None) or room_number_from_name(room_name)
+                remove_room_record(chat_id)
+                clear_room_state(chat_id)
+                write_release_request(chat_id, room_number, room_name)
                 
                 await query.answer("✅ Deal closed! Users removed from group.")
                 return CHOOSING
