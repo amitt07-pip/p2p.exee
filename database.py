@@ -522,9 +522,9 @@ def get_deal_by_trade_id(trade_id: str) -> Optional[Dict[str, Any]]:
     5090) and in any case."""
     if not trade_id:
         return None
-    wanted = trade_id.strip().upper()
+    wanted = trade_id.strip().upper().lstrip('#')
     if not wanted.startswith(TRADE_ID_PREFIX):
-        wanted = f"{TRADE_ID_PREFIX}{wanted.lstrip('#')}"
+        wanted = f"{TRADE_ID_PREFIX}{wanted}"
     try:
         conn = get_db_connection()
         if not conn:
