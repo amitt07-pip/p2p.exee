@@ -3856,6 +3856,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 tx_url = f"https://bscscan.com/address/{buyer_addr}"
             
             duration = format_deal_duration(deal_data.get('created_at') if deal_data else None)
+            if duration == "N/A" and original_chat_id in room_creation_times:
+                duration = format_deal_duration(
+                    datetime.fromtimestamp(room_creation_times[original_chat_id])
+                )
             schedule_task(send_deal_complete_message(context.bot, original_chat_id, tx_url, duration))
             
             amount = 0.0
@@ -5461,57 +5465,6 @@ async def send_deposit_found_message(bot, send_chat_id: int, amount: str, seller
     
     except Exception as e:
         logger.warning(f"❌ Failed to send deposit found message: {e}")
-
-
-async def send_deal_complete_message(bot, send_chat_id: int, chat_id: int, buyer_addr: str) -> None:
-    """Send deal complete confirmation message"""
-    try:
-        # Calculate time taken
-        if chat_id in room_creation_times:
-            start_time = room_creation_times[chat_id]
-            current_time = time.time()
-            time_taken_seconds = int(current_time - start_time)
-            time_taken_minutes = time_taken_seconds // 60
-            time_taken_text = f"{time_taken_minutes} mins" if time_taken_minutes > 0 else f"{time_taken_seconds} secs"
-        else:
-            time_taken_text = "N/A"
-        
-        # Build BSCscan URL for buyer's wallet
-        bscscan_url = f"https://bscscan.com/address/{buyer_addr}"
-        
-        # Format the message with bold text and hyperlink
-        message_text = (
-            f"🎉 <b>Deal Complete!</b> ✅\n\n"
-            f"⏱️ <b>Time Taken:</b> {time_taken_text}\n"
-            f"🔗 <b>Release TX Link:</b> <a href='{bscscan_url}'>Click Here</a>\n\n"
-            f"Thank you for using our safe escrow system."
-        )
-        
-        # Create close deal button
-        keyboard = [[InlineKeyboardButton("❌ Close Deal", callback_data=f"close_deal_{chat_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        image_path = os.path.join(SCRIPT_DIR, "deal_complete_image.jpg")
-        if os.path.exists(image_path):
-            await bot.send_photo(
-                chat_id=send_chat_id,
-                photo=open(image_path, 'rb'),
-                caption=message_text,
-                parse_mode='HTML',
-                reply_markup=reply_markup
-            )
-            logger.info(f"✅ Sent deal complete message to room {chat_id}")
-        else:
-            await bot.send_message(
-                chat_id=send_chat_id,
-                text=message_text,
-                parse_mode='HTML',
-                reply_markup=reply_markup
-            )
-            logger.warning(f"⚠️ Sent deal complete (text only) to room {chat_id} - image not found")
-    
-    except Exception as e:
-        logger.warning(f"❌ Failed to send deal complete message: {e}")
 
 
 async def send_step4_amount_message(bot, send_chat_id: int, chat_id: int) -> None:
