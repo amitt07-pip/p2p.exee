@@ -4671,6 +4671,11 @@ Once you've sent the amount, tap the button below."""
                         seller_user_id=get_user_id(seller_user)
                     )
                     logger.info(f"📊 Saved roles to database: buyer={buyer_user}, seller={seller_user}")
+                    # The Trade ID is claimed here so the log shows it before the
+                    # deal summary; assign_trade_id is idempotent, so the summary
+                    # later shows the same one.
+                    database.assign_trade_id(original_chat_id)
+                    await update_room_log_status(context.bot, original_chat_id)
                 
                 await send_step2_blockchain_message(context.bot, send_chat_id, original_chat_id)
             
@@ -5858,13 +5863,23 @@ def build_room_log_text(chat_id: int, status: str) -> str:
     token = deal.get('coin') or 'N/A'
     amount = deal.get('amount') or 'N/A'
 
-    return (
-        f"<b>P2P ROOM {room_number if room_number else 'N/A'}</b>\n\n"
-        f"• <b>Initiator ({initiator_display}) Status</b> - {initiator_status}\n"
-        f"• <b>CounterParty ({counterparty_display}) Status</b> - {counterparty_status}\n"
-        f"• <b>Deal Amount[{token}]</b> - {amount}\n"
-        f"• <b>Deal Status</b> - {status}"
-    )
+    lines = [
+        f"<b>P2P ROOM {room_number if room_number else 'N/A'}</b>\n",
+        f"• <b>Initiator ({initiator_display}) Status</b> - {initiator_status}",
+        f"• <b>CounterParty ({counterparty_display}) Status</b> - {counterparty_status}",
+    ]
+
+    # Trade ID and the roles only exist once the buyer/seller roles are picked.
+    buyer = deal.get('buyer_username') or (room_initiators.get(chat_id) or {}).get('buyer')
+    seller = deal.get('seller_username') or (room_initiators.get(chat_id) or {}).get('seller')
+    if deal.get('trade_id') and buyer and seller:
+        lines.append(f"• <b>Trade ID</b> - #{deal['trade_id']}")
+        lines.append(f"• <b>Buyer</b> - @{buyer}")
+        lines.append(f"• <b>Seller</b> - @{seller}")
+
+    lines.append(f"• <b>Deal Amount[{token}]</b> - {amount}")
+    lines.append(f"• <b>Deal Status</b> - {status}")
+    return "\n".join(lines)
 
 
 async def send_room_log_message(bot, chat_id: int, buyer_username: str, seller_username: str, 
