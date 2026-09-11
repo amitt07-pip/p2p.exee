@@ -785,11 +785,18 @@ def remove_room_record(chat_id):
 
 def clear_room_state(chat_id):
     """Forget every in-memory trace of a finished deal so the room can be reused."""
-    for tracker in (disclaimer_sent, role_selection_sent, processed_rooms, rooms_waiting_for_requests):
+    for tracker in (disclaimer_sent, role_selection_sent, processed_rooms, rooms_waiting_for_requests,
+                    step1_messages_sent, step4_amount_messages_sent):
         tracker.discard(chat_id)
+    # Every step message id has to go too: a leftover id makes the bot treat that
+    # step as already sent and the next deal in this room stops there.
     for state in (room_awaiting_hash, room_transaction_state, user_roles, approvals, release_approvals,
                   room_joined_users, room_log_messages, room_confirmed_deposits, room_used_tx_hashes,
-                  room_fee_tiers, room_creation_times, role_messages):
+                  room_fee_tiers, room_creation_times, role_messages, room_initiators,
+                  step2_blockchain_messages, step3_coin_messages, step4_messages, step5_messages,
+                  buyer_wallet_messages, seller_wallet_messages, deal_summary_messages,
+                  deposit_address_messages, release_messages, payment_confirmations,
+                  user_blockchain, user_coins, buyer_addresses, seller_addresses):
         state.pop(chat_id, None)
     room_messages.pop(str(chat_id), None)
 
@@ -7321,6 +7328,10 @@ async def send_room_waiting_messages(application: Application, chat_id: int) -> 
         else:
             logger.info(f"Room info found: {room_name} - initiator: @{initiator_username}, counterparty: @{counterparty_username}")
         
+        # A premade room keeps its chat id between deals, so drop anything left
+        # from the previous deal before this one starts.
+        clear_room_state(chat_id)
+
         # Track room creation time for time calculation later
         if chat_id not in room_creation_times:
             room_creation_times[chat_id] = time.time()
