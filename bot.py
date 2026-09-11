@@ -3774,24 +3774,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 except Exception as e:
                     logger.warning(f"Could not edit release confirmation: {e}")
             
-            # Step 2: Edit message to show just group chat id
-            final_text = str(send_chat_id)
-            
-            if original_chat_id in release_messages:
-                msg_id = release_messages[original_chat_id]
-                try:
-                    await context.bot.edit_message_caption(
-                        chat_id=send_chat_id,
-                        message_id=msg_id,
-                        caption=final_text,
-                        parse_mode='HTML',
-                        reply_markup=None
-                    )
-                    logger.info(f"✅ Edited release confirmation message with group id in room {original_chat_id}")
-                except Exception as e:
-                    logger.warning(f"Could not edit release confirmation to group id: {e}")
-            
-            # Step 3: Calculate fees and send Partial Release Complete message
+            # Step 2: Calculate fees and send Partial Release Complete message
             buyer_addr = buyer_addresses.get(original_chat_id, "0xUnknown")
             
             # Get deal data for calculations
