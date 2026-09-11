@@ -4153,7 +4153,10 @@ Release has been declined by the seller."""
             
             logger.info(f"✅ User selected blockchain: BSC in room {chat_id}")
             user_blockchain[chat_id] = 'BSC'
-            
+
+            # Answered first so the button stops spinning while the next step is sent
+            await query.answer("✅ Blockchain: BSC selected")
+
             # Save blockchain to database
             database.set_network(chat_id, 'BSC')
             
@@ -4177,8 +4180,7 @@ Release has been declined by the seller."""
                 logger.info(f"✅ Step 3 sent for room {chat_id}")
             else:
                 logger.info(f"⏩ Step 3 already sent for room {chat_id}, skipping")
-            
-            await query.answer("✅ Blockchain: BSC selected")
+
             return CHOOSING
             
         except Exception as e:
@@ -4215,7 +4217,10 @@ Release has been declined by the seller."""
             
             logger.info(f"✅ User {query.from_user.username} selected coin: {coin_type} in room {chat_id}")
             user_coins[chat_id] = coin_type
-            
+
+            # Answered first so the button stops spinning while the next step is sent
+            await query.answer(f"✅ Coin selected: {coin_type}")
+
             # Save coin to database
             database.set_coin(chat_id, coin_type)
             
@@ -4231,7 +4236,7 @@ Release has been declined by the seller."""
             
             try:
                 await query.edit_message_caption(
-                    caption="<b>Step 3 - Select Coin</b>",
+                    caption="<b>STEP 3 - SELECT COIN</b>",
                     reply_markup=reply_markup,
                     parse_mode='HTML'
                 )
@@ -4261,8 +4266,7 @@ Release has been declined by the seller."""
                 logger.info(f"✅ Step 4 sent for room {chat_id}")
             else:
                 logger.info(f"⏩ Step 4 already sent for room {chat_id}, skipping")
-            
-            await query.answer(f"✅ Coin selected: {coin_type}")
+
             return CHOOSING
             
         except Exception as e:
