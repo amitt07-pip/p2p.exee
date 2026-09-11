@@ -6251,7 +6251,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                     selected_blockchain = user_blockchain.get(original_chat_id, 'BSC')
                     step6_text = f"<b>Step 8</b> - @{seller_username}, enter your {selected_blockchain} wallet address\nto receive refund if deal is cancelled"
                     
-                    image_path = "step6_buyer_address_image.jpg"
+                    image_path = "step7_seller_address_image.jpg"
                     if os.path.exists(image_path):
                         msg = await context.bot.send_photo(
                             chat_id=send_chat_id,
