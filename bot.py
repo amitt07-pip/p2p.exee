@@ -1590,8 +1590,8 @@ async def reply_privately(update: Update, text: str, reply_markup=None) -> None:
 
 
 async def setfakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /setfakeaddy <trade id> - admin only. Store a backup BSC escrow
-    address (USDT or USDC) for that deal's room, applied later with /fakeaddy.
+    """Handle /setfakeaddy <room number> - admin only. Store a backup BSC escrow
+    address (USDT or USDC) for that room, applied to a deal later with /fakeaddy.
     Nothing is shown in the deal room; the exchange happens in the admin's DM."""
     user = update.effective_user
 
@@ -1599,25 +1599,17 @@ async def setfakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     if not context.args:
-        await reply_privately(update, "❌ Usage: <code>/setfakeaddy &lt;trade id&gt;</code>")
+        await reply_privately(update, "❌ Usage: <code>/setfakeaddy &lt;room number&gt;</code>")
         return
 
-    deal = deal_for_trade_id(context.args[0])
-    if not deal:
+    arg = context.args[0].strip().lstrip('#')
+    if not arg.isdigit() or not (ROOM_NUMBER_MIN <= int(arg) <= ROOM_NUMBER_MAX):
         await reply_privately(
             update,
-            f"❌ No deal with Trade ID <code>{context.args[0].strip()}</code>."
+            f"❌ Room number must be between {ROOM_NUMBER_MIN} and {ROOM_NUMBER_MAX}."
         )
         return
-
-    room_number = deal.get('room_number')
-    if room_number is None:
-        await reply_privately(
-            update,
-            f"❌ No room number known for <code>{deal.get('trade_id')}</code>."
-        )
-        return
-    room_number = int(room_number)
+    room_number = int(arg)
 
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("USDT", callback_data=f"setfakeaddy:USDT:{room_number}"),
@@ -1724,7 +1716,7 @@ async def fakeaddy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await reply_privately(
             update,
             f"❌ No backup address stored for <b>MM ROOM {room_number}</b>. "
-            f"Set one with <code>/setfakeaddy {deal.get('trade_id')}</code>."
+            f"Set one with <code>/setfakeaddy {room_number}</code>."
         )
         return
 
@@ -1757,7 +1749,7 @@ async def fakeaddylist_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not entries:
         await reply_privately(
             update,
-            "No backup addresses stored. Set one with <code>/setfakeaddy &lt;trade id&gt;</code>."
+            "No backup addresses stored. Set one with <code>/setfakeaddy &lt;room number&gt;</code>."
         )
         return
 
